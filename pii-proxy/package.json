@@ -1,0 +1,15 @@
+{
+  "name": "claude-code-pii-proxy",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "npx esbuild src/server.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/server.js",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "esbuild": "^0.25.9"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2"
+  }
+}
