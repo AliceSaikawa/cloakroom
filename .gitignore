@@ -2,3 +2,6 @@ node_modules/
 build-src/
 dist/
 *.log
+src/
+stubs/
+types/
