@@ -7,6 +7,24 @@ type PatternDef = {
   readonly captureGroup?: number
 }
 
+function selectNonOverlappingMatches(matches: readonly PIIMatch[]): readonly PIIMatch[] {
+  const sorted = [...matches].sort(
+    (left, right) => left.start - right.start || (right.end - right.start) - (left.end - left.start),
+  )
+
+  const winners: PIIMatch[] = []
+  let lastEnd = -1
+
+  for (const match of sorted) {
+    if (match.start >= lastEnd) {
+      winners.push(match)
+      lastEnd = match.end
+    }
+  }
+
+  return winners.sort((left, right) => right.start - left.start)
+}
+
 function luhnCheck(digits: string): boolean {
   const nums = digits.replace(/\D/g, '')
   let sum = 0
@@ -58,6 +76,29 @@ const PATTERNS: readonly PatternDef[] = [
     category: 'NAME',
     pattern: /(?:Author|Committer):\s+(.+?)\s+<[^>]+>/g,
     captureGroup: 1,
+  },
+  {
+    category: 'SSN',
+    pattern: /\b(?!000|666|9\d{2})\d{3}[-\s]?(?!00)\d{2}[-\s]?(?!0000)\d{4}\b/g,
+  },
+  {
+    category: 'IP_ADDRESS',
+    pattern:
+      /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b/g,
+  },
+  {
+    category: 'IP_ADDRESS',
+    pattern:
+      /\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b/g,
+  },
+  {
+    category: 'POSTAL_CODE',
+    pattern: /〒\d{3}-\d{4}/g,
+  },
+  {
+    category: 'POSTAL_CODE',
+    pattern: /\b\d{3}-\d{4}(?=\s*(?:$|[^\d]))/g,
+    validate: (match: string) => !/^\d{3}-\d{2}-\d{4}$/.test(match),
   },
 ]
 
@@ -144,14 +185,11 @@ export function applyReplacements(
   matches: readonly PIIMatch[],
   register: (original: string, category: PIICategory) => string,
 ): string {
+  // Resolve overlaps before editing so one PII value never turns into nested placeholders.
+  const winners = selectNonOverlappingMatches(matches)
   let result = text
-  const usedRange = new Set<string>()
 
-  for (const match of matches) {
-    const rangeKey = `${match.start}:${match.end}`
-    if (usedRange.has(rangeKey)) continue
-    usedRange.add(rangeKey)
-
+  for (const match of winners) {
     const placeholder = register(match.text, match.category)
     result = result.slice(0, match.start) + placeholder + result.slice(match.end)
   }

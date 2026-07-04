@@ -2,8 +2,11 @@
   "name": "claude-code-pii-proxy",
   "version": "1.0.0",
   "type": "module",
+  "bin": {
+    "pii-proxy": "dist/cli.js"
+  },
   "scripts": {
-    "build": "npx esbuild src/server.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/server.js",
+    "build": "npx esbuild src/server.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/server.js && npx esbuild src/cli.ts --bundle --platform=node --target=node22 --format=esm --banner:js='#!/usr/bin/env node' --outfile=dist/cli.js",
     "start": "node dist/server.js"
   },
   "dependencies": {

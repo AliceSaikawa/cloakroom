@@ -1,6 +1,8 @@
 import { loadPIIConfig } from './config.js'
+import { getActiveCategories, isPassthroughEnabled } from './controlState.js'
 import { MappingTable } from './mappingTable.js'
 import { detectOllamaPII } from './ollamaFilter.js'
+import { OpenAIStreamRestorer } from './openaiStreamRestorer.js'
 import { applyReplacements, detectDictionaryPII, detectRegexPII } from './regexFilter.js'
 import { StreamRestorer } from './streamRestorer.js'
 import type { PIICategory, PIIFilterConfig } from './types.js'
@@ -8,17 +10,23 @@ import type { PIICategory, PIIFilterConfig } from './types.js'
 export class PIIFilter {
   private readonly mappingTable = new MappingTable()
   private readonly config: PIIFilterConfig
+  private readonly allowlist: ReadonlySet<string>
 
   constructor(config = loadPIIConfig()) {
     this.config = config
+    this.allowlist = new Set(config.allowlist)
   }
 
   isEnabled(): boolean {
-    return this.config.enabled
+    return this.config.enabled && !isPassthroughEnabled()
   }
 
   createStreamRestorer(): StreamRestorer {
     return new StreamRestorer(this.mappingTable)
+  }
+
+  createOpenAIStreamRestorer(): OpenAIStreamRestorer {
+    return new OpenAIStreamRestorer(this.mappingTable)
   }
 
   async filterRequestBody(requestBody: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -50,8 +58,8 @@ export class PIIFilter {
     this.mappingTable.clear()
   }
 
-
-  private register(original: string, category: PIICategory): string {
+  private registerMaskedValue(original: string, category: PIICategory): string {
+    if (this.allowlist.has(original)) return original
     return this.mappingTable.register(original, category)
   }
 
@@ -133,28 +141,29 @@ export class PIIFilter {
     if (!text.trim()) return text
 
     let filtered = text
+    const categories = getActiveCategories(this.config.categories)
+    if (categories.length === 0) return filtered
 
     const dictionaryMatches = detectDictionaryPII(
       filtered,
-      this.config.categories,
+      categories,
       this.config.dictionary,
     )
-    filtered = applyReplacements(filtered, dictionaryMatches, this.register.bind(this))
+    filtered = applyReplacements(filtered, dictionaryMatches, this.registerMaskedValue.bind(this))
 
-    const regexMatches = detectRegexPII(filtered, this.config.categories, this.config.customPatterns)
-    filtered = applyReplacements(filtered, regexMatches, this.register.bind(this))
+    const regexMatches = detectRegexPII(filtered, categories, this.config.customPatterns)
+    filtered = applyReplacements(filtered, regexMatches, this.registerMaskedValue.bind(this))
 
     if (this.config.ollamaEnabled && useOllama) {
       const ollamaMatches = await detectOllamaPII(
         [{ index: 0, text: filtered }],
         this.config.ollamaEndpoint,
         this.config.ollamaModel,
-        this.config.categories,
+        categories,
       )
 
       if (ollamaMatches.length > 0) {
-        const sorted = [...ollamaMatches].sort((a, b) => b.start - a.start)
-        filtered = applyReplacements(filtered, sorted, this.register.bind(this))
+        filtered = applyReplacements(filtered, ollamaMatches, this.registerMaskedValue.bind(this))
       }
     }
 

@@ -10,10 +10,10 @@ function findEventBoundary(buffer: string): number {
   return Math.min(lf, crlf)
 }
 
-export class StreamRestorer {
+export class OpenAIStreamRestorer {
   private readonly textRestorer: TextDeltaRestorer
   private sseBuffer = ''
-  private lastContentIndex = 0
+  private lastChoiceIndex = 0
 
   constructor(mappingTable: MappingTable) {
     this.textRestorer = new TextDeltaRestorer(mappingTable)
@@ -48,11 +48,7 @@ export class StreamRestorer {
 
     const tail = this.textRestorer.flush()
     if (tail) {
-      out += `event: content_block_delta\ndata: ${JSON.stringify({
-        type: 'content_block_delta',
-        index: this.lastContentIndex,
-        delta: { type: 'text_delta', text: tail },
-      })}\n\n`
+      out += `data: ${JSON.stringify(this.createTailChunk(tail))}\n\n`
     }
 
     return out
@@ -62,13 +58,6 @@ export class StreamRestorer {
     const lines = rawEvent.split(/\r?\n/)
     const output: string[] = []
 
-    let eventName: string | null = null
-    for (const line of lines) {
-      if (line.startsWith('event:')) {
-        eventName = line.slice(6).trim()
-      }
-    }
-
     for (const line of lines) {
       if (!line.startsWith('data:')) {
         output.push(line)
@@ -76,44 +65,41 @@ export class StreamRestorer {
       }
 
       const payload = line.slice(5).trimStart()
-      if (!payload || payload === '[DONE]') {
+      if (!payload) {
         output.push(line)
+        continue
+      }
+
+      if (payload === '[DONE]') {
+        // Flush any placeholder fragment before the terminal OpenAI marker so
+        // the client receives the fully restored text in order.
+        const tail = this.textRestorer.flush()
+        if (tail) {
+          output.push(`data: ${JSON.stringify(this.createTailChunk(tail))}`)
+        }
+        output.push('data: [DONE]')
         continue
       }
 
       try {
         const parsed = JSON.parse(payload) as Record<string, unknown>
-        const type = parsed['type']
+        const choices = parsed['choices']
 
-        if (type === 'content_block_delta' || eventName === 'content_block_delta') {
-          if (typeof parsed['index'] === 'number') {
-            this.lastContentIndex = parsed['index'] as number
-          }
+        if (Array.isArray(choices)) {
+          for (const choice of choices) {
+            if (!choice || typeof choice !== 'object') continue
+            const choiceRecord = choice as Record<string, unknown>
+            if (typeof choiceRecord['index'] === 'number') {
+              this.lastChoiceIndex = choiceRecord['index'] as number
+            }
 
-          const delta = parsed['delta']
-          if (
-            delta &&
-            typeof delta === 'object' &&
-            (delta as Record<string, unknown>)['type'] === 'text_delta' &&
-            typeof (delta as Record<string, unknown>)['text'] === 'string'
-          ) {
-            const restored = this.textRestorer.process((delta as Record<string, string>)['text'])
-            ;(delta as Record<string, unknown>)['text'] = restored
-          }
-        }
+            const delta = choiceRecord['delta']
+            if (!delta || typeof delta !== 'object') continue
 
-        if (type === 'message_stop' || eventName === 'message_stop') {
-          const tail = this.textRestorer.flush()
-          if (tail) {
-            output.push(
-              `event: content_block_delta`,
-              `data: ${JSON.stringify({
-                type: 'content_block_delta',
-                index: this.lastContentIndex,
-                delta: { type: 'text_delta', text: tail },
-              })}`,
-              '',
-            )
+            const deltaRecord = delta as Record<string, unknown>
+            if (typeof deltaRecord['content'] === 'string') {
+              deltaRecord['content'] = this.textRestorer.process(deltaRecord['content'])
+            }
           }
         }
 
@@ -124,5 +110,16 @@ export class StreamRestorer {
     }
 
     return output.join('\n')
+  }
+
+  private createTailChunk(text: string): Record<string, unknown> {
+    return {
+      choices: [
+        {
+          index: this.lastChoiceIndex,
+          delta: { content: text },
+        },
+      ],
+    }
   }
 }

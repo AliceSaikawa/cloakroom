@@ -1,5 +1,9 @@
 import type { PIICategory } from './types.js'
 
+function escapeRegExp(input: string): string {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 export class MappingTable {
   private readonly originalToPlaceholder = new Map<string, string>()
   private readonly placeholderToOriginal = new Map<string, string>()
@@ -24,13 +28,26 @@ export class MappingTable {
   }
 
   replaceAllPlaceholders(input: string): string {
-    let output = input
-    for (const [placeholder, original] of this.placeholderToOriginal.entries()) {
-      while (output.includes(placeholder)) {
-        output = output.replace(placeholder, original)
-      }
+    if (this.placeholderToOriginal.size === 0) return input
+
+    // Replace every known placeholder in a single pass to avoid quadratic scans.
+    const pattern = new RegExp(
+      [...this.placeholderToOriginal.keys()]
+        .sort((left, right) => right.length - left.length)
+        .map(escapeRegExp)
+        .join('|'),
+      'g',
+    )
+
+    return input.replace(pattern, (match) => this.placeholderToOriginal.get(match) ?? match)
+  }
+
+  getLongestPlaceholderLength(): number {
+    let longest = 0
+    for (const placeholder of this.placeholderToOriginal.keys()) {
+      longest = Math.max(longest, placeholder.length)
     }
-    return output
+    return longest
   }
 
   clear(): void {
@@ -38,5 +55,4 @@ export class MappingTable {
     this.placeholderToOriginal.clear()
     this.counters.clear()
   }
-
 }

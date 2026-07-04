@@ -1,14 +1,20 @@
-export type PIICategory =
-  | 'EMAIL'
-  | 'PHONE'
-  | 'ADDRESS'
-  | 'URL_USER'
-  | 'API_KEY'
-  | 'CREDIT_CARD'
-  | 'MY_NUMBER'
-  | 'NAME'
-  | 'ORG'
-  | 'SCHOOL'
+export const PII_CATEGORIES = [
+  'EMAIL',
+  'PHONE',
+  'ADDRESS',
+  'URL_USER',
+  'API_KEY',
+  'CREDIT_CARD',
+  'MY_NUMBER',
+  'NAME',
+  'ORG',
+  'SCHOOL',
+  'SSN',
+  'IP_ADDRESS',
+  'POSTAL_CODE',
+] as const
+
+export type PIICategory = (typeof PII_CATEGORIES)[number]
 
 export type PIIMatch = {
   readonly text: string
@@ -30,6 +36,7 @@ export type PIIFilterConfig = {
   readonly ollamaEnabled: boolean
   readonly customPatterns: readonly { readonly name: string; readonly pattern: string }[]
   readonly dictionary: readonly DictionaryEntry[]
+  readonly allowlist: readonly string[]
 }
 
 export const DEFAULT_CONFIG: PIIFilterConfig = {
@@ -44,10 +51,14 @@ export const DEFAULT_CONFIG: PIIFilterConfig = {
     'NAME',
     'ORG',
     'SCHOOL',
+    'SSN',
+    'IP_ADDRESS',
+    'POSTAL_CODE',
   ],
   ollamaEndpoint: 'http://localhost:11434',
   ollamaModel: 'gemma3:4b',
   ollamaEnabled: true,
   customPatterns: [],
   dictionary: [],
+  allowlist: [],
 }
