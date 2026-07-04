@@ -46,6 +46,7 @@ async function loadActualModules() {
     actualModuleCachePromise = (async () => {
       const bundleDir = mkdtempSync(join(tmpdir(), 'pii-proxy-test-'))
       const entries = [
+        ['controlState.ts', 'controlState.mjs'],
         ['provider.ts', 'provider.mjs'],
         ['streamRestorer.ts', 'streamRestorer.mjs'],
         ['openaiStreamRestorer.ts', 'openaiStreamRestorer.mjs'],
@@ -66,13 +67,14 @@ async function loadActualModules() {
           )
         }
 
-        const [provider, anthropicStream, openaiStream] = await Promise.all([
+        const [controlState, provider, anthropicStream, openaiStream] = await Promise.all([
+          import(pathToFileURL(join(bundleDir, 'controlState.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'provider.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'streamRestorer.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'openaiStreamRestorer.mjs')).href),
         ])
 
-        return { provider, anthropicStream, openaiStream, bundleDir }
+        return { controlState, provider, anthropicStream, openaiStream, bundleDir }
       } catch (error) {
         rmSync(bundleDir, { recursive: true, force: true })
         throw error
@@ -511,6 +513,38 @@ async function testStreamRestorers() {
   console.log('#3 Stream restoration: OK')
 }
 
+async function testControlState() {
+  console.log('\n=== Control State ===')
+
+  const { controlState } = await loadActualModules()
+  controlState.resetControlState()
+
+  assert.equal(controlState.getControlStatus().passthroughEnabled, false, '#13: filter should start enabled')
+  controlState.setPassthroughEnabled(true)
+  assert.equal(controlState.isPassthroughEnabled(), true, '#13: passthrough should be enabled')
+  controlState.togglePassthrough()
+  assert.equal(controlState.isPassthroughEnabled(), false, '#13: SIGUSR1 toggle helper should switch modes')
+
+  assert.equal(controlState.isKnownPIICategory('PHONE'), true, '#13: known categories should be accepted')
+  assert.equal(controlState.isKnownPIICategory('NOPE'), false, '#13: unknown categories should be rejected')
+
+  controlState.disableCategory('PHONE')
+  assert.deepEqual(
+    controlState.getActiveCategories(['EMAIL', 'PHONE']),
+    ['EMAIL'],
+    '#13: disabled categories should be removed at runtime',
+  )
+  controlState.enableCategory('PHONE')
+  assert.deepEqual(
+    controlState.getActiveCategories(['EMAIL', 'PHONE']),
+    ['EMAIL', 'PHONE'],
+    '#13: enabled categories should return to active filtering',
+  )
+
+  controlState.resetControlState()
+  console.log('#13 Runtime control state: OK')
+}
+
 // ============================================================
 // Scenario 2: Filter OFF
 // ============================================================
@@ -554,6 +588,30 @@ async function testActualProxy() {
     return false
   }
   console.log('Proxy health: OK')
+
+  const initialStatus = JSON.parse(await httpGet(`${PROXY_URL}/control/status`))
+  assert.equal(initialStatus.filterEnabled, true, 'Control status should start with filtering enabled')
+  assert.ok(initialStatus.activeCategories.includes('EMAIL'), 'Control status should list active categories')
+  console.log('Control status: OK')
+
+  const passthroughStatus = JSON.parse(await httpPost(`${PROXY_URL}/control/passthrough`, {}, {}))
+  assert.equal(passthroughStatus.passthroughEnabled, true, 'Passthrough endpoint should disable filtering')
+
+  const filterStatus = JSON.parse(await httpPost(`${PROXY_URL}/control/filter`, {}, {}))
+  assert.equal(filterStatus.passthroughEnabled, false, 'Filter endpoint should re-enable filtering')
+
+  const disabledPhoneStatus = JSON.parse(await httpPost(`${PROXY_URL}/control/disable/PHONE`, {}, {}))
+  assert.ok(
+    !disabledPhoneStatus.activeCategories.includes('PHONE'),
+    'Disable category endpoint should remove PHONE from active categories',
+  )
+
+  const enabledPhoneStatus = JSON.parse(await httpPost(`${PROXY_URL}/control/enable/PHONE`, {}, {}))
+  assert.ok(
+    enabledPhoneStatus.activeCategories.includes('PHONE'),
+    'Enable category endpoint should restore PHONE to active categories',
+  )
+  console.log('Control endpoints: OK')
 
   // Send a message containing PII through the proxy (no API key needed for filtering verification)
   const requestBody = {
@@ -678,6 +736,7 @@ try {
   testBugRegressions()
   await testProviderRouting()
   await testStreamRestorers()
+  await testControlState()
 
   if (runProxy) {
     await testActualProxy()

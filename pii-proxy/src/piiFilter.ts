@@ -1,4 +1,5 @@
 import { loadPIIConfig } from './config.js'
+import { getActiveCategories, isPassthroughEnabled } from './controlState.js'
 import { MappingTable } from './mappingTable.js'
 import { detectOllamaPII } from './ollamaFilter.js'
 import { OpenAIStreamRestorer } from './openaiStreamRestorer.js'
@@ -17,7 +18,7 @@ export class PIIFilter {
   }
 
   isEnabled(): boolean {
-    return this.config.enabled
+    return this.config.enabled && !isPassthroughEnabled()
   }
 
   createStreamRestorer(): StreamRestorer {
@@ -140,15 +141,17 @@ export class PIIFilter {
     if (!text.trim()) return text
 
     let filtered = text
+    const categories = getActiveCategories(this.config.categories)
+    if (categories.length === 0) return filtered
 
     const dictionaryMatches = detectDictionaryPII(
       filtered,
-      this.config.categories,
+      categories,
       this.config.dictionary,
     )
     filtered = applyReplacements(filtered, dictionaryMatches, this.registerMaskedValue.bind(this))
 
-    const regexMatches = detectRegexPII(filtered, this.config.categories, this.config.customPatterns)
+    const regexMatches = detectRegexPII(filtered, categories, this.config.customPatterns)
     filtered = applyReplacements(filtered, regexMatches, this.registerMaskedValue.bind(this))
 
     if (this.config.ollamaEnabled && useOllama) {
@@ -156,7 +159,7 @@ export class PIIFilter {
         [{ index: 0, text: filtered }],
         this.config.ollamaEndpoint,
         this.config.ollamaModel,
-        this.config.categories,
+        categories,
       )
 
       if (ollamaMatches.length > 0) {

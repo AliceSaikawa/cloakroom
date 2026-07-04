@@ -1,5 +1,16 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { request as httpsRequest } from 'node:https'
+import {
+  disableCategory,
+  enableCategory,
+  getActiveCategories,
+  getControlStatus,
+  isKnownPIICategory,
+  resetControlState,
+  setPassthroughEnabled,
+  togglePassthrough,
+} from './controlState.js'
+import { loadPIIConfig } from './config.js'
 import { resolveProvider, shouldFilterMessagesPath } from './provider.js'
 import { SessionFilterStore } from './sessionFilterStore.js'
 
@@ -40,6 +51,78 @@ function writeProxyError(res: ServerResponse): void {
   if (!res.writableEnded && !res.destroyed) {
     res.destroy()
   }
+}
+
+function writeJson(res: ServerResponse, statusCode: number, payload: unknown): void {
+  res.writeHead(statusCode, { 'content-type': 'application/json' })
+  res.end(JSON.stringify(payload))
+}
+
+function writeControlStatus(res: ServerResponse): void {
+  const status = getControlStatus()
+  const config = loadPIIConfig()
+  writeJson(res, 200, {
+    ...status,
+    filterEnabled: config.enabled && !status.passthroughEnabled,
+    activeCategories: getActiveCategories(config.categories),
+  })
+}
+
+function getControlCategory(req: IncomingMessage, prefix: string): string | undefined {
+  const path = req.url?.split('?')[0] ?? '/'
+  if (!path.startsWith(prefix)) return undefined
+  const rawCategory = path.slice(prefix.length)
+  if (!rawCategory) return undefined
+  return decodeURIComponent(rawCategory).trim().toUpperCase()
+}
+
+function handleControlRequest(req: IncomingMessage, res: ServerResponse): boolean {
+  const path = req.url?.split('?')[0] ?? '/'
+
+  if (req.method === 'GET' && path === '/control/status') {
+    writeControlStatus(res)
+    return true
+  }
+
+  if (req.method === 'POST' && path === '/control/passthrough') {
+    setPassthroughEnabled(true)
+    writeControlStatus(res)
+    return true
+  }
+
+  if (req.method === 'POST' && path === '/control/filter') {
+    resetControlState()
+    writeControlStatus(res)
+    return true
+  }
+
+  if (req.method === 'POST') {
+    const disabledCategory = getControlCategory(req, '/control/disable/')
+    if (disabledCategory) {
+      if (!isKnownPIICategory(disabledCategory)) {
+        writeJson(res, 400, { error: `Unknown PII category: ${disabledCategory}` })
+        return true
+      }
+
+      disableCategory(disabledCategory)
+      writeControlStatus(res)
+      return true
+    }
+
+    const enabledCategory = getControlCategory(req, '/control/enable/')
+    if (enabledCategory) {
+      if (!isKnownPIICategory(enabledCategory)) {
+        writeJson(res, 400, { error: `Unknown PII category: ${enabledCategory}` })
+        return true
+      }
+
+      enableCategory(enabledCategory)
+      writeControlStatus(res)
+      return true
+    }
+  }
+
+  return false
 }
 
 type StreamRestorerLike = {
@@ -198,6 +281,10 @@ const server = createServer(async (req, res) => {
       return
     }
 
+    if (handleControlRequest(req, res)) {
+      return
+    }
+
     if (shouldFilterMessagesPath(req)) {
       await handleMessages(req, res)
       return
@@ -216,6 +303,12 @@ server.on('listening', () => {
   if (address && typeof address === 'object') {
     process.stdout.write(`PII proxy listening on http://127.0.0.1:${address.port}\n`)
   }
+})
+
+process.on('SIGUSR1', () => {
+  const status = togglePassthrough()
+  const mode = status.passthroughEnabled ? 'passthrough' : 'filtering'
+  process.stdout.write(`PII proxy control mode: ${mode}\n`)
 })
 
 process.on('SIGINT', () => {

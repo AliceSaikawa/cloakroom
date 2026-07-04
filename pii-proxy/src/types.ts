@@ -1,17 +1,20 @@
-export type PIICategory =
-  | 'EMAIL'
-  | 'PHONE'
-  | 'ADDRESS'
-  | 'URL_USER'
-  | 'API_KEY'
-  | 'CREDIT_CARD'
-  | 'MY_NUMBER'
-  | 'NAME'
-  | 'ORG'
-  | 'SCHOOL'
-  | 'SSN'
-  | 'IP_ADDRESS'
-  | 'POSTAL_CODE'
+export const PII_CATEGORIES = [
+  'EMAIL',
+  'PHONE',
+  'ADDRESS',
+  'URL_USER',
+  'API_KEY',
+  'CREDIT_CARD',
+  'MY_NUMBER',
+  'NAME',
+  'ORG',
+  'SCHOOL',
+  'SSN',
+  'IP_ADDRESS',
+  'POSTAL_CODE',
+] as const
+
+export type PIICategory = (typeof PII_CATEGORIES)[number]
 
 export type PIIMatch = {
   readonly text: string
