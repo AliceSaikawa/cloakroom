@@ -19,17 +19,26 @@ User input / Tool results / System prompts
 ## Setup
 
 ```bash
-# 1. Ollama + model
+# 1. Install dependencies and build
+npm --prefix pii-proxy install
+npm --prefix pii-proxy run build
+
+# 2. Create the config file
+node pii-proxy/dist/cli.js init
+
+# 3. Configure Claude Code to use the proxy
+node pii-proxy/dist/cli.js install --for=claude-code
+
+# 4. Start the proxy
+node pii-proxy/dist/cli.js start
+```
+
+To enable Ollama-backed person and organization detection:
+
+```bash
 brew install ollama
 brew services start ollama
 ollama pull gemma3:4b
-
-# 2. Build
-npm install
-./build-pii.sh
-
-# 3. Run
-node dist/cli.js
 ```
 
 ## Configuration
@@ -48,6 +57,15 @@ node dist/cli.js
 ```
 
 Disable: `CLAUDE_PII_FILTER=0 node dist/cli.js`
+
+Runtime controls:
+
+```bash
+node pii-proxy/dist/cli.js status
+curl -X POST http://127.0.0.1:8787/control/passthrough
+curl -X POST http://127.0.0.1:8787/control/filter
+curl -X POST http://127.0.0.1:8787/control/disable/PHONE
+```
 
 ## Limitations
 
