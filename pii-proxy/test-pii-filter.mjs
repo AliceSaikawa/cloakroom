@@ -144,6 +144,8 @@ const PATTERNS = [
   { category: 'PHONE', pattern: /(?:\+81[-\s]?|0)\d{1,4}[-\s]?\d{1,4}[-\s]?\d{3,4}\b/g, validate: (match) => match.replace(/[-\s]/g, '').length >= 10 },
   { category: 'PHONE', pattern: /\+\d{1,3}[-\s]\d{1,14}(?:[-\s]\d{1,14}){0,4}\b/g },
   { category: 'ADDRESS', pattern: /(?:北海道|東京都|(?:大阪|京都)府|.{2,3}県).{1,8}(?:市|区|町|村|郡).{1,20}?(?:\d{1,4}[-ー]\d{1,4}(?:[-ー]\d{1,4})?|[一二三四五六七八九十百]+丁目)/g },
+  { category: 'ADDRESS', pattern: /(?:[一二三四五六七八九十百千〇零\d]+丁目)?[一二三四五六七八九十百千〇零\d]+番(?:地)?(?:[一二三四五六七八九十百千〇零\d]+号)?/g },
+  { category: 'ADDRESS', pattern: /\d{1,4}[-ー]\d{1,4}(?:[-ー]\d{1,4})?\s*[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}A-Za-z0-9ー・\-\s]{2,30}(?:マンション|アパート|ハイツ|コーポ|レジデンス|ビル|タワー|荘)\s*\d{1,4}(?:号室|号)?/gu },
   { category: 'URL_USER', pattern: /https?:\/\/[^\s/@]+:[^\s/@]+@[^\s/]+/g },
   { category: 'NAME', pattern: /(?:Author|Committer):\s+(.+?)\s+<[^>]+>/g, captureGroup: 1 },
   { category: 'SSN', pattern: /\b(?!000|666|9\d{2})\d{3}[-\s]?(?!00)\d{2}[-\s]?(?!0000)\d{4}\b/g },
@@ -398,6 +400,20 @@ function testBugRegressions() {
     assert.ok(filtered.includes('[POSTAL_CODE_'), '#9: postal code should be masked')
     assert.ok(!filtered.includes('100-0001'), '#9: raw postal code should not remain')
     console.log('#9 POSTAL_CODE: OK')
+  }
+
+  {
+    const mapping = new MappingTable()
+    const filtered = filterText(
+      '住所詳細: 三丁目12番地5号、1-2-3 サンプルマンション 405号室',
+      { ...config, categories: ['ADDRESS'] },
+      mapping,
+    )
+    const addressCount = (filtered.match(/\[ADDRESS_\d+\]/g) ?? []).length
+    assert.ok(addressCount >= 2, `#8: detailed Japanese address parts should be masked, got: ${filtered}`)
+    assert.ok(!filtered.includes('三丁目12番地5号'), '#8: chome/ban/go address should be masked')
+    assert.ok(!filtered.includes('サンプルマンション 405号室'), '#8: apartment room address should be masked')
+    console.log('#8 Japanese ADDRESS details: OK')
   }
 
   {
