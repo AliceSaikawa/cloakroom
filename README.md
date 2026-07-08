@@ -162,3 +162,4 @@ curl -X POST http://127.0.0.1:8787/control/disable/PHONE
 - `customPatterns` でマッチした値は指定した `name` に関わらず常に `NAME` カテゴリとして扱われる
 - `/v1/messages` と `/v1/chat/completions` 以外のパスはPIIフィルタなしで透過プロキシされる
 - ソースファイル内のPIIがマスクされることで、コード生成の精度に影響が出る場合がある
+- アシスタントの`tool_use`ブロックの`input`フィールドはフィルタ対象外(`src/piiFilter.ts`の`filterContent`が素通しする設計)。会話履歴の再送時、ツール呼び出し引数に含まれる生PII(実名入りのファイルパス等)はマスクされずに上流APIへ送信される

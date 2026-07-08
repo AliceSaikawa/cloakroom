@@ -162,3 +162,4 @@ Requests to any other path are passed through untouched (defaulting to Anthropic
 - Matches from `customPatterns` are always tagged as `NAME`, regardless of the pattern's given `name`
 - Paths other than `/v1/messages` and `/v1/chat/completions` are proxied without any PII filtering
 - Masking PII inside source code can affect code-generation accuracy
+- The `input` field of an assistant `tool_use` block is not filtered (by design, `filterContent` in `src/piiFilter.ts` passes it through untouched). When conversation history is resent, raw PII embedded in tool call arguments (e.g., file paths containing real names) is sent upstream unmasked
