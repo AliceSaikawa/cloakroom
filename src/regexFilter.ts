@@ -56,6 +56,17 @@ function ibanCheck(input: string): boolean {
   return remainder === 1
 }
 
+function myNumberCheck(input: string): boolean {
+  const digits = input.replace(/[-\s]/g, '').split('').map((digit) => Number.parseInt(digit, 10))
+  if (digits.length !== 12 || digits.some((digit) => !Number.isInteger(digit))) return false
+
+  const weights = [6, 5, 4, 3, 2, 7, 6, 5, 4, 3, 2]
+  const sum = weights.reduce((acc, weight, index) => acc + weight * (digits[index] ?? 0), 0)
+  const remainder = sum % 11
+  const checkDigit = remainder <= 1 ? 0 : 11 - remainder
+  return checkDigit === digits[11]
+}
+
 function normalizeDictionaryChar(char: string, caseSensitive: boolean): string {
   const code = char.charCodeAt(0)
   const halfWidth =
@@ -113,11 +124,16 @@ const PATTERNS: readonly PatternDef[] = [
     pattern: /\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b/g,
     validate: luhnCheck,
   },
-  { category: 'MY_NUMBER', pattern: /\b\d{4}[-\s]\d{4}[-\s]\d{4}\b/g },
+  {
+    category: 'MY_NUMBER',
+    pattern: /\b\d{4}[-\s]\d{4}[-\s]\d{4}\b/g,
+    validate: myNumberCheck,
+  },
   {
     category: 'MY_NUMBER',
     pattern: /(?:マイナンバー|個人番号)[:：]?\s*(\d{12}|\d{4}[-\s]\d{4}[-\s]\d{4})\b/g,
     captureGroup: 1,
+    validate: myNumberCheck,
   },
   {
     category: 'PHONE',
@@ -206,7 +222,7 @@ const PATTERNS: readonly PatternDef[] = [
   {
     category: 'DATE_TIME',
     pattern:
-      /(?:生年月日|誕生日|DOB|Date of Birth)[:：]?\s*((?:\d{4}[\/.-]\d{1,2}[\/.-]\d{1,2})|(?:\d{1,2}[\/.-]\d{1,2}[\/.-]\d{4})|(?:(?:明治|大正|昭和|平成|令和)\d{1,2}年\d{1,2}月\d{1,2}日))/gi,
+      /(?:生年月日|誕生日|Birthday|DOB|Date of Birth)[:：]?\s*((?:\d{4}[\/.-]\d{1,2}[\/.-]\d{1,2})|(?:\d{4}年\d{1,2}月\d{1,2}日)|(?:\d{1,2}[\/.-]\d{1,2}[\/.-]\d{4})|(?:[A-Z][a-z]+ \d{1,2}, \d{4})|(?:(?:明治|大正|昭和|平成|令和)\d{1,2}年\d{1,2}月\d{1,2}日))/g,
     captureGroup: 1,
   },
   {
@@ -218,6 +234,21 @@ const PATTERNS: readonly PatternDef[] = [
     category: 'HEALTH_INSURANCE',
     pattern:
       /(?:保険証番号|健康保険証番号)[:：]?\s*(?:記号\s*)?([A-Z0-9-]{2,12})[、,\s]+(?:番号\s*)?([A-Z0-9-]{2,12})/gi,
+  },
+  {
+    category: 'HEALTH_INSURANCE',
+    pattern: /(?:保険証番号|健康保険証番号)[:：]?\s*(\d{8})\b/g,
+    captureGroup: 1,
+  },
+  {
+    category: 'HEALTH_INSURANCE',
+    pattern: /(?:被保険者番号)[:：]?\s*([A-Z0-9-]{6,20})\b/gi,
+    captureGroup: 1,
+  },
+  {
+    category: 'MEDICAL_RECORD',
+    pattern: /(?:医師免許証番号|医師免許番号)[:：]?\s*(\d{6})\b/g,
+    captureGroup: 1,
   },
 ]
 

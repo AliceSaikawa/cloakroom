@@ -48,6 +48,7 @@ async function loadActualModules() {
       const entries = [
         ['controlState.ts', 'controlState.mjs'],
         ['provider.ts', 'provider.mjs'],
+        ['regexFilter.ts', 'regexFilter.mjs'],
         ['streamRestorer.ts', 'streamRestorer.mjs'],
         ['openaiStreamRestorer.ts', 'openaiStreamRestorer.mjs'],
       ]
@@ -67,14 +68,15 @@ async function loadActualModules() {
           )
         }
 
-        const [controlState, provider, anthropicStream, openaiStream] = await Promise.all([
+        const [controlState, provider, regexFilter, anthropicStream, openaiStream] = await Promise.all([
           import(pathToFileURL(join(bundleDir, 'controlState.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'provider.mjs')).href),
+          import(pathToFileURL(join(bundleDir, 'regexFilter.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'streamRestorer.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'openaiStreamRestorer.mjs')).href),
         ])
 
-        return { controlState, provider, anthropicStream, openaiStream, bundleDir }
+        return { controlState, provider, regexFilter, anthropicStream, openaiStream, bundleDir }
       } catch (error) {
         rmSync(bundleDir, { recursive: true, force: true })
         throw error
@@ -561,6 +563,56 @@ async function testControlState() {
   console.log('#13 Runtime control state: OK')
 }
 
+async function testSensitiveRecordRegexCoverage() {
+  console.log('\n=== Sensitive Record Regex Coverage ===')
+
+  const { regexFilter } = await loadActualModules()
+
+  function mask(text, categories) {
+    const matches = regexFilter.detectRegexPII(text, categories)
+    const counters = new Map()
+    const filtered = regexFilter.applyReplacements(text, matches, (match) => {
+      const count = (counters.get(match.category) ?? 0) + 1
+      counters.set(match.category, count)
+      return `[${match.category}_${count}]`
+    })
+    return { matches, filtered }
+  }
+
+  {
+    const japanese = mask('生年月日: 1990年4月1日', ['DATE_TIME'])
+    const english = mask('Birthday: April 1, 1990', ['DATE_TIME'])
+    assert.ok(japanese.filtered.includes('[DATE_TIME_1]'), '#34: Japanese birthday should be masked')
+    assert.ok(english.filtered.includes('[DATE_TIME_1]'), '#34: English birthday should be masked')
+    assert.equal(
+      mask('release date 2026-07-02', ['DATE_TIME']).matches.length,
+      0,
+      '#34: context-free dates should not be masked by default',
+    )
+    console.log('#34 DATE_TIME: OK')
+  }
+
+  {
+    const health = mask('健康保険証番号: 12345678', ['HEALTH_INSURANCE'])
+    const insured = mask('被保険者番号: 13-ABC-123456', ['HEALTH_INSURANCE'])
+    const medical = mask('医師免許証番号: 123456', ['MEDICAL_RECORD'])
+    assert.ok(health.filtered.includes('[HEALTH_INSURANCE_1]'), '#35: health insurance number should be masked')
+    assert.ok(insured.filtered.includes('[HEALTH_INSURANCE_1]'), '#35: insured number should be masked')
+    assert.ok(medical.filtered.includes('[MEDICAL_RECORD_1]'), '#35: medical license number should be masked')
+    console.log('#35 MEDICAL/HEALTH_INSURANCE: OK')
+  }
+
+  {
+    const validRaw = mask('個人番号: 123456789018', ['MY_NUMBER'])
+    const validHyphen = mask('マイナンバー: 1234-5678-9018', ['MY_NUMBER'])
+    const invalid = mask('個人番号: 123456789012', ['MY_NUMBER'])
+    assert.ok(validRaw.filtered.includes('[MY_NUMBER_1]'), '#36: valid raw My Number should be masked')
+    assert.ok(validHyphen.filtered.includes('[MY_NUMBER_1]'), '#36: valid hyphenated My Number should be masked')
+    assert.equal(invalid.matches.length, 0, '#36: invalid My Number check digit should be rejected')
+    console.log('#36 MY_NUMBER check digit: OK')
+  }
+}
+
 // ============================================================
 // Scenario 2: Filter OFF
 // ============================================================
@@ -753,6 +805,7 @@ try {
   await testProviderRouting()
   await testStreamRestorers()
   await testControlState()
+  await testSensitiveRecordRegexCoverage()
 
   if (runProxy) {
     await testActualProxy()
