@@ -17,7 +17,6 @@ Claude Code / API client
 │                                                 │
 │  1. Dictionary exact match  (config.dictionary)│
 │  2. Regex match      (built-in + customPatterns)│
-│  3. Ollama LLM match  (NAME / ORG / SCHOOL only)│
 │       ↓                                         │
 │  Placeholder registration → [EMAIL_1] [NAME_2]  │
 │  (per-session MappingTable)                     │
@@ -41,8 +40,7 @@ Claude Code / API client
 Claude Code / API client
 ```
 
-- Detection happens in three stages: **dictionary (exact match) → regex → Ollama LLM**. Ollama only handles the `NAME` / `ORG` / `SCHOOL` categories, and is skipped entirely if none of those are in the active category list.
-- Ollama detection is **not applied to the system prompt** (the `system` field is only filtered by dictionary and regex). Only user/assistant message content and tool results go through Ollama.
+- Detection happens in two stages: **dictionary (exact match) → regex (built-in + customPatterns)**.
 - Placeholders use the format `[CATEGORY_N]` (e.g. `[EMAIL_1]`, `[NAME_2]`). The same original value always reuses the same placeholder. Values in `allowlist` are never masked.
 - The original-value ↔ placeholder mapping is kept **per session**. If a request carries `x-pii-session-id`, `anthropic-session-id`, or `x-session-id`, the mapping is tied to that ID (30-minute TTL); otherwise it lives only as long as the underlying TCP connection stays open. Sending `x-pii-session-reset: 1` discards that session's mapping.
 
@@ -65,16 +63,6 @@ node dist/cli.js start
 
 `npm run build` bundles `src/server.ts` → `dist/server.js` and `src/cli.ts` → `dist/cli.js` (with a shebang) via esbuild. `package.json`'s `bin` maps `cloakroom` to `dist/cli.js`, so linking it globally (e.g. `npm link`) also gives you a `cloakroom` command.
 
-To enable Ollama-backed person/organization/school detection (on by default):
-
-```bash
-brew install ollama
-brew services start ollama
-ollama pull gemma3:4b
-```
-
-If Ollama is unreachable or times out, that round of Ollama detection is silently skipped (dictionary and regex results are still applied).
-
 ### Using it with Claude Code
 
 `cloakroom install --for=claude-code` writes the following into `~/.claude/.env` (overwriting any existing matching keys):
@@ -96,11 +84,8 @@ Config file: `~/.claude/pii-filter.json` (created by `cloakroom init`, overwritt
 |---|---|---|
 | `enabled` | `true` | Master on/off switch. When `false`, neither masking nor restoration runs |
 | `categories` | `["EMAIL","PHONE","ADDRESS","API_KEY","CREDIT_CARD","MY_NUMBER","NAME","ORG","SCHOOL","SSN","IP_ADDRESS","POSTAL_CODE"]` | Enabled PII categories. Of the 13 defined categories, `URL_USER` (Basic-auth-style userinfo in a URL) is not included by default and must be added explicitly |
-| `ollamaEndpoint` | `"http://localhost:11434"` | Ollama API endpoint |
-| `ollamaModel` | `"gemma3:4b"` | Ollama model to use |
-| `ollamaEnabled` | `true` | Whether Ollama-backed `NAME`/`ORG`/`SCHOOL` detection runs |
 | `customPatterns` | `[]` | Extra regex patterns ({`name`, `pattern`}). **Matches are always registered under the `NAME` category** (the `name` field is kept only as a label, not used for categorization) |
-| `dictionary` | `[]` | Known exact-match values ({`text`, `category`}). Evaluated before regex and Ollama |
+| `dictionary` | `[]` | Known exact-match values ({`text`, `category`}). Evaluated before regex |
 | `allowlist` | `[]` | Exact-match strings that are never masked, even if detected |
 
 Environment variables:
@@ -125,7 +110,7 @@ cloakroom test
 - `init [--force]` — creates `~/.claude/pii-filter.json`. Does nothing if it already exists and `--force` is not passed (`--yes` is listed in the help text but is currently unused by the implementation)
 - `install --for=claude-code` — writes the `~/.claude/.env` settings described above. Any other `--for` value throws an error
 - `status` — hits `/health` and `/control/status` and prints the combined result as JSON; exits with code 1 if the proxy is unreachable
-- `test` — runs a sample text through the filter with Ollama disabled, printing the result, as a quick sanity check
+- `test` — runs a sample text through the filter with the default config, printing the result, as a quick sanity check
 
 ## Runtime controls
 
@@ -160,7 +145,7 @@ Requests to any other path are passed through untouched (defaulting to Anthropic
 
 ## PII categories detected by regex
 
-`EMAIL`, `PHONE` (Japanese and international formats), `ADDRESS` (Japanese addresses), `URL_USER` (credentials embedded in a URL), `API_KEY` (`sk-`, `ghp_`, `gho_`, `github_pat_`, `AKIA`, `xox[bpras]-`, `sk-ant-`, etc.), `CREDIT_CARD` (Luhn-validated), `MY_NUMBER` (Japanese My Number format), `NAME` (only via Git's `Author:`/`Committer:` trailers — general name detection is handled by Ollama), `SSN`, `IP_ADDRESS` (IPv4/IPv6), `POSTAL_CODE`. General detection of `NAME` / `ORG` / `SCHOOL` is handled by the Ollama LLM stage.
+`EMAIL`, `PHONE` (Japanese and international formats), `ADDRESS` (Japanese addresses), `URL_USER` (credentials embedded in a URL), `API_KEY` (`sk-`, `ghp_`, `gho_`, `github_pat_`, `AKIA`, `xox[bpras]-`, `sk-ant-`, etc.), `CREDIT_CARD` (Luhn-validated), `MY_NUMBER` (Japanese My Number format), `NAME` (only via Git's `Author:`/`Committer:` trailers), `SSN`, `IP_ADDRESS` (IPv4/IPv6), `POSTAL_CODE`.
 
 ## Tests
 
@@ -168,14 +153,10 @@ Requests to any other path are passed through untouched (defaulting to Anthropic
 |---|---|---|
 | `node test-pii-filter.mjs` | Filter ON/OFF, bug regressions, provider routing, stream restoration, runtime control | None (bundles source on the fly with esbuild) |
 | `node test-pii-filter.mjs --proxy` | Same as above, plus a scenario that hits a running proxy for real | A running proxy and `ANTHROPIC_API_KEY` set |
-| `node test-integrated.mjs` | Accuracy of the full regex + Ollama detection pipeline | **Ollama running locally** with `gemma3:4b` pulled |
-| `node test-hard-cases.mjs` | Hard edge cases for Ollama detection (e.g. names vs. common nouns) | **Ollama running locally** |
-| `node test-ollama-pii-v2.mjs` | Accuracy of the Ollama detection prompt itself | **Ollama running locally** |
 
 ## Limitations
 
-- Ollama detection does not apply to the system prompt (the `system` field only goes through dictionary and regex filtering)
-- Ollama's 4B model is not perfectly accurate for name/org/school detection; false positives and misses can occur. Detection has a timeout budget of roughly 4 seconds and adds latency per new content block
+- Proper nouns such as personal and organization names are only masked when explicitly registered in `dictionary` / `customPatterns` (there is no automatic detection for them)
 - Runtime controls (passthrough, per-category disable) are process-wide, not per-session, and reset when the server restarts
 - For clients that do not send an explicit session ID header, the mapping only lives as long as the TCP connection stays open; once it drops, previously issued placeholders can no longer be restored
 - Matches from `customPatterns` are always tagged as `NAME`, regardless of the pattern's given `name`

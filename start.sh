@@ -20,11 +20,6 @@ cleanup() {
   update_status "stopped"
 }
 
-if ! curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
-  OLLAMA_HOST=127.0.0.1:11434 /opt/homebrew/bin/ollama serve > /dev/null 2>&1 &
-  sleep 2
-fi
-
 update_status "running"
 node "$(dirname "$0")/dist/server.js"
 cleanup

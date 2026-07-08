@@ -36,7 +36,6 @@ function loadConfig() {
       categories: ['EMAIL', 'PHONE', 'NAME', 'ORG', 'ADDRESS', 'API_KEY', 'CREDIT_CARD', 'MY_NUMBER', 'SCHOOL', 'SSN', 'IP_ADDRESS', 'POSTAL_CODE'],
       dictionary: [],
       allowlist: [],
-      ollamaEnabled: false,
     }
   }
 }
@@ -294,7 +293,7 @@ const TEST_MESSAGE = `私は${TEST_PII.dictName}です。${TEST_PII.dictOrg}に�
 // ============================================================
 function testFilterON() {
   console.log('\n=== Scenario 1: Filter ON ===')
-  const config = { ...loadConfig(), dictionary: TEST_DICTIONARY, ollamaEnabled: false }
+  const config = { ...loadConfig(), dictionary: TEST_DICTIONARY }
   assert.ok(config.enabled !== false, 'Config should be enabled')
 
   const mapping = new MappingTable()
@@ -341,7 +340,7 @@ function testFilterON() {
 
 function testBugRegressions() {
   console.log('\n=== Bug Regressions ===')
-  const config = { ...loadConfig(), dictionary: [], allowlist: [], ollamaEnabled: false }
+  const config = { ...loadConfig(), dictionary: [], allowlist: [] }
 
   {
     const mapping = new MappingTable()
@@ -550,7 +549,7 @@ async function testControlState() {
 // ============================================================
 function testFilterOFF() {
   console.log('\n=== Scenario 2: Filter OFF ===')
-  const config = { ...loadConfig(), enabled: false, dictionary: TEST_DICTIONARY, ollamaEnabled: false }
+  const config = { ...loadConfig(), enabled: false, dictionary: TEST_DICTIONARY }
 
   // When disabled, filterRequestBody returns input unchanged.
   // Simulating: if !enabled, skip filtering

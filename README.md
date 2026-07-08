@@ -17,7 +17,6 @@ Claude Code / APIクライアント
 │                                                 │
 │  1. 辞書完全一致    (config.dictionary)          │
 │  2. 正規表現        (組み込みパターン + customPatterns) │
-│  3. Ollama LLM      (NAME / ORG / SCHOOL のみ)  │
 │       ↓                                         │
 │  プレースホルダ登録 → [EMAIL_1] [NAME_2] 等       │
 │  (セッション単位の MappingTable)                  │
@@ -41,8 +40,7 @@ Claude Code / APIクライアント
 Claude Code / APIクライアント
 ```
 
-- 検出は3段階: **辞書(完全一致) → 正規表現 → Ollama LLM**。Ollamaは `NAME` / `ORG` / `SCHOOL` の3カテゴリのみを担当し、有効カテゴリにこれらが含まれない場合は呼び出されない。
-- Ollamaによる検出は **システムプロンプトには適用されない**(system フィールドは辞書・正規表現のみでフィルタされる)。ユーザー/アシスタントのメッセージ本文とツール結果のみが対象。
+- 検出は2段階: **辞書(完全一致) → 正規表現(組み込み + customPatterns)**。
 - プレースホルダは `[カテゴリ_連番]` 形式(例: `[EMAIL_1]`, `[NAME_2]`)。同じ元値は同じプレースホルダに再利用される。`allowlist` に含まれる値はマスクされない。
 - マッピング(元値⇄プレースホルダ)は**セッション単位**で保持される。`x-pii-session-id` / `anthropic-session-id` / `x-session-id` のいずれかのヘッダがあればそのIDに紐付き(30分TTL)、無ければ同じ接続(TCPソケット)が生きている間だけ保持される。`x-pii-session-reset: 1` でそのセッションのマッピングを破棄できる。
 
@@ -65,16 +63,6 @@ node dist/cli.js start
 
 `npm run build` は esbuild で `src/server.ts` → `dist/server.js`、`src/cli.ts` → `dist/cli.js`(shebang付き)にバンドルする。`package.json` の `bin` は `cloakroom: dist/cli.js` なので、`npm link` 等でグローバル導入すれば `cloakroom` コマンドとしても使える。
 
-Ollamaによる人名・組織名・学校名検出(既定で有効)を使うには:
-
-```bash
-brew install ollama
-brew services start ollama
-ollama pull gemma3:4b
-```
-
-Ollamaが応答しない/タイムアウトする場合、その回のOllama検出は静かにスキップされる(辞書・正規表現の結果はそのまま反映される)。
-
 ### Claude Code から使う
 
 `cloakroom install --for=claude-code` は `~/.claude/.env` に以下を書き込む(既存の同名キーがあれば上書き):
@@ -96,11 +84,8 @@ OPENAI_BASE_URL=http://127.0.0.1:8787/v1
 |---|---|---|
 | `enabled` | `true` | フィルタ全体の有効/無効。`false` ならマスク・復元とも行わない |
 | `categories` | `["EMAIL","PHONE","ADDRESS","API_KEY","CREDIT_CARD","MY_NUMBER","NAME","ORG","SCHOOL","SSN","IP_ADDRESS","POSTAL_CODE"]` | 有効化するPIIカテゴリ。定義済み全13種のうち `URL_USER`(URL内Basic認証情報)は既定では含まれず、使うには明示的に追加する必要がある |
-| `ollamaEndpoint` | `"http://localhost:11434"` | Ollama APIのエンドポイント |
-| `ollamaModel` | `"gemma3:4b"` | 使用するOllamaモデル |
-| `ollamaEnabled` | `true` | Ollamaによる `NAME`/`ORG`/`SCHOOL` 検出を使うか |
 | `customPatterns` | `[]` | 追加の正規表現({`name`, `pattern`})。**マッチした値は常に `NAME` カテゴリとして登録される**(`name` フィールドはラベルとしてのみ保持され、カテゴリには使われない) |
-| `dictionary` | `[]` | 完全一致で検出する既知の値({`text`, `category`})。正規表現・Ollamaより先に評価される |
+| `dictionary` | `[]` | 完全一致で検出する既知の値({`text`, `category`})。正規表現より先に評価される |
 | `allowlist` | `[]` | ここに含まれる文字列(完全一致)は検出されてもマスクされない |
 
 環境変数:
@@ -125,7 +110,7 @@ cloakroom test
 - `init [--force]` — `~/.claude/pii-filter.json` を作成。既に存在し `--force` が無ければ何もしない(`--yes` はヘルプに記載されているが現時点の実装では未使用)
 - `install --for=claude-code` — 上記の `~/.claude/.env` 書き込みを行う。`--for=claude-code` 以外の値はエラーになる
 - `status` — `/health` と `/control/status` を叩いて結果をJSONで表示。プロキシに到達できなければエラー終了(終了コード1)
-- `test` — Ollamaを使わない設定でサンプルテキストをフィルタし、結果を表示する動作確認コマンド
+- `test` — デフォルト設定でサンプルテキストをフィルタし、結果を表示する動作確認コマンド
 
 ## 実行時制御
 
@@ -160,7 +145,7 @@ curl -X POST http://127.0.0.1:8787/control/disable/PHONE
 
 ## 検出対象のPII種別(正規表現)
 
-`EMAIL`, `PHONE`(日本/国際形式), `ADDRESS`(日本の住所), `URL_USER`(URL内の認証情報), `API_KEY`(`sk-`, `ghp_`, `gho_`, `github_pat_`, `AKIA`, `xox[bpras]-`, `sk-ant-` 等), `CREDIT_CARD`(Luhn検証あり), `MY_NUMBER`(マイナンバー形式), `NAME`(Gitの `Author:`/`Committer:` トレーラーのみ。人名の一般的な検出はOllama側が担当), `SSN`, `IP_ADDRESS`(IPv4/IPv6), `POSTAL_CODE`(郵便番号)。`NAME` / `ORG` / `SCHOOL` の一般的な検出はOllama LLMが担当する。
+`EMAIL`, `PHONE`(日本/国際形式), `ADDRESS`(日本の住所), `URL_USER`(URL内の認証情報), `API_KEY`(`sk-`, `ghp_`, `gho_`, `github_pat_`, `AKIA`, `xox[bpras]-`, `sk-ant-` 等), `CREDIT_CARD`(Luhn検証あり), `MY_NUMBER`(マイナンバー形式), `NAME`(Gitの `Author:`/`Committer:` トレーラーのみ), `SSN`, `IP_ADDRESS`(IPv4/IPv6), `POSTAL_CODE`(郵便番号)。
 
 ## テスト
 
@@ -168,14 +153,10 @@ curl -X POST http://127.0.0.1:8787/control/disable/PHONE
 |---|---|---|
 | `node test-pii-filter.mjs` | フィルタON/OFF、バグ回帰、プロバイダ振り分け、ストリーム復元、実行時制御のテスト一式 | なし(esbuildでソースを都度バンドルして検証) |
 | `node test-pii-filter.mjs --proxy` | 上記に加え、稼働中のプロキシへ実際にリクエストするシナリオも実行 | プロキシが起動済み、かつ `ANTHROPIC_API_KEY` 設定済み |
-| `node test-integrated.mjs` | 正規表現+Ollamaの一連の検出パイプラインの精度検証 | **Ollamaがローカルで稼働**(`gemma3:4b` pull済み) |
-| `node test-hard-cases.mjs` | 人名と一般名詞の区別など、Ollama検出の難しいエッジケース検証 | **Ollamaがローカルで稼働** |
-| `node test-ollama-pii-v2.mjs` | Ollamaへの検出プロンプト自体の精度確認 | **Ollamaがローカルで稼働** |
 
 ## 制限事項
 
-- Ollama検出はシステムプロンプトには適用されない(system フィールドは辞書・正規表現のみ)
-- Ollamaの4Bモデルによる人名/組織名/学校名検出は完全ではなく、誤検出・検出漏れが起こり得る。検出には最大4秒程度のタイムアウト予算があり、新規コンテンツごとにレイテンシが追加される
+- 人名・組織名などの固有名詞は、`dictionary` / `customPatterns` に登録したものだけがマスクされる(自動検出はしない)
 - passthrough/カテゴリ無効化などの実行時制御状態はプロセス全体で共有され、セッションごとの制御はできない。サーバー再起動でリセットされる
 - 明示的なセッションIDヘッダを送らないクライアントでは、マッピングはTCP接続が維持されている間のみ有効。接続が切れると、以前発行したプレースホルダは復元できなくなる
 - `customPatterns` でマッチした値は指定した `name` に関わらず常に `NAME` カテゴリとして扱われる

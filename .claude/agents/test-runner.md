@@ -9,7 +9,6 @@ tools: Read, Bash, Grep, Glob
 
 ## 任務
 - 指定された test-*.mjs（未指定なら全件）を実行
-- Ollama 依存テストは事前に `curl -s http://localhost:11434/api/tags` で疎通確認し、落ちていればその旨を報告
 
 ## 出力規約
 - pass/fail 集計 + 失敗ケースのみ詳細（期待値/実際/該当file:line）
