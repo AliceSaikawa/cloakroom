@@ -1,6 +1,7 @@
 import { loadPIIConfig } from './config.js'
 import { getActiveCategories, isPassthroughEnabled } from './controlState.js'
 import { MappingTable } from './mappingTable.js'
+import { detectOllamaPII } from './ollamaFilter.js'
 import { OpenAIStreamRestorer } from './openaiStreamRestorer.js'
 import { applyReplacements, detectDictionaryPII, detectRegexPII } from './regexFilter.js'
 import { StreamRestorer } from './streamRestorer.js'
@@ -73,7 +74,7 @@ export class PIIFilter {
 
       const message = { ...(msg as Record<string, unknown>) }
       if ('content' in message) {
-        message['content'] = await this.filterContent(message['content'])
+        message['content'] = await this.filterContent(message['content'], true)
       }
       filtered.push(message)
     }
@@ -83,7 +84,7 @@ export class PIIFilter {
 
   private async filterSystemField(system: unknown): Promise<unknown> {
     if (typeof system === 'string') {
-      return this.filterText(system)
+      return this.filterText(system, false)
     }
 
     if (Array.isArray(system)) {
@@ -96,7 +97,7 @@ export class PIIFilter {
 
         const out = { ...(block as Record<string, unknown>) }
         if (out['type'] === 'text' && typeof out['text'] === 'string') {
-          out['text'] = await this.filterText(out['text'])
+          out['text'] = await this.filterText(out['text'], false)
         }
         filteredBlocks.push(out)
       }
@@ -106,8 +107,8 @@ export class PIIFilter {
     return system
   }
 
-  private async filterContent(content: unknown): Promise<unknown> {
-    if (typeof content === 'string') return this.filterText(content)
+  private async filterContent(content: unknown, useOllama: boolean): Promise<unknown> {
+    if (typeof content === 'string') return this.filterText(content, useOllama)
 
     if (!Array.isArray(content)) return content
 
@@ -121,12 +122,12 @@ export class PIIFilter {
       const out = { ...(block as Record<string, unknown>) }
 
       if (out['type'] === 'text' && typeof out['text'] === 'string') {
-        out['text'] = await this.filterText(out['text'])
+        out['text'] = await this.filterText(out['text'], useOllama)
       } else if (out['type'] === 'tool_result') {
         if (typeof out['content'] === 'string') {
-          out['content'] = await this.filterText(out['content'])
+          out['content'] = await this.filterText(out['content'], useOllama)
         } else if (Array.isArray(out['content'])) {
-          out['content'] = await this.filterContent(out['content'])
+          out['content'] = await this.filterContent(out['content'], useOllama)
         }
       }
 
@@ -136,7 +137,7 @@ export class PIIFilter {
     return filteredBlocks
   }
 
-  private async filterText(text: string): Promise<string> {
+  private async filterText(text: string, useOllama: boolean): Promise<string> {
     if (!text.trim()) return text
 
     let filtered = text
@@ -152,6 +153,19 @@ export class PIIFilter {
 
     const regexMatches = detectRegexPII(filtered, categories, this.config.customPatterns)
     filtered = applyReplacements(filtered, regexMatches, this.registerMaskedValue.bind(this))
+
+    if (this.config.ollamaEnabled && useOllama) {
+      const ollamaMatches = await detectOllamaPII(
+        [{ index: 0, text: filtered }],
+        this.config.ollamaEndpoint,
+        this.config.ollamaModel,
+        categories,
+      )
+
+      if (ollamaMatches.length > 0) {
+        filtered = applyReplacements(filtered, ollamaMatches, this.registerMaskedValue.bind(this))
+      }
+    }
 
     return filtered
   }

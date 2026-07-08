@@ -127,7 +127,7 @@ async function printStatus(): Promise<void> {
 }
 
 async function runFilterSample(): Promise<void> {
-  const filter = new PIIFilter(DEFAULT_CONFIG)
+  const filter = new PIIFilter({ ...DEFAULT_CONFIG, ollamaEnabled: false })
   const input = {
     messages: [
       {

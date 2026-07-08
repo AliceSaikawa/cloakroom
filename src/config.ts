@@ -21,6 +21,9 @@ export function loadPIIConfig(): PIIFilterConfig {
     loadedConfig = {
       enabled: parsed.enabled ?? DEFAULT_CONFIG.enabled,
       categories: parsed.categories ?? DEFAULT_CONFIG.categories,
+      ollamaEndpoint: parsed.ollamaEndpoint ?? DEFAULT_CONFIG.ollamaEndpoint,
+      ollamaModel: parsed.ollamaModel ?? DEFAULT_CONFIG.ollamaModel,
+      ollamaEnabled: parsed.ollamaEnabled ?? DEFAULT_CONFIG.ollamaEnabled,
       customPatterns: parsed.customPatterns ?? DEFAULT_CONFIG.customPatterns,
       dictionary: parsed.dictionary ?? DEFAULT_CONFIG.dictionary,
       allowlist: parsed.allowlist ?? DEFAULT_CONFIG.allowlist,

@@ -31,6 +31,9 @@ export type DictionaryEntry = {
 export type PIIFilterConfig = {
   readonly enabled: boolean
   readonly categories: readonly PIICategory[]
+  readonly ollamaEndpoint: string
+  readonly ollamaModel: string
+  readonly ollamaEnabled: boolean
   readonly customPatterns: readonly { readonly name: string; readonly pattern: string }[]
   readonly dictionary: readonly DictionaryEntry[]
   readonly allowlist: readonly string[]
@@ -52,6 +55,9 @@ export const DEFAULT_CONFIG: PIIFilterConfig = {
     'IP_ADDRESS',
     'POSTAL_CODE',
   ],
+  ollamaEndpoint: 'http://localhost:11434',
+  ollamaModel: 'gemma3:4b',
+  ollamaEnabled: false,
   customPatterns: [],
   dictionary: [],
   allowlist: [],
