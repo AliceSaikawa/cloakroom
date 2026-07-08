@@ -7,6 +7,28 @@ const CONFIG_PATH = join(homedir(), '.claude', 'pii-filter.json')
 
 let loadedConfig: PIIFilterConfig | null = null
 
+function isLoopbackHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[(.*)\]$/, '$1')
+  return normalized === 'localhost' || normalized === '::1' || normalized.startsWith('127.')
+}
+
+export function normalizeOllamaEndpoint(endpoint: unknown, allowRemote: boolean): string {
+  if (typeof endpoint !== 'string') return DEFAULT_CONFIG.ollamaEndpoint
+
+  try {
+    const url = new URL(endpoint)
+    if (!['http:', 'https:'].includes(url.protocol)) return DEFAULT_CONFIG.ollamaEndpoint
+    if (allowRemote || isLoopbackHost(url.hostname)) return url.origin
+  } catch {
+    return DEFAULT_CONFIG.ollamaEndpoint
+  }
+
+  process.stderr.write(
+    `Ignoring non-loopback ollamaEndpoint "${endpoint}". Set allowRemoteOllama: true to allow it.\n`,
+  )
+  return DEFAULT_CONFIG.ollamaEndpoint
+}
+
 export function loadPIIConfig(): PIIFilterConfig {
   if (loadedConfig) return loadedConfig
 
@@ -22,12 +44,14 @@ export function loadPIIConfig(): PIIFilterConfig {
       ...DEFAULT_CONFIG.auditLog,
       ...(parsed.auditLog ?? {}),
     }
+    const allowRemoteOllama = parsed.allowRemoteOllama === true
 
     loadedConfig = {
       enabled: parsed.enabled ?? DEFAULT_CONFIG.enabled,
       mode: parsed.mode === 'anonymize' ? 'anonymize' : DEFAULT_CONFIG.mode,
       categories: parsed.categories ?? DEFAULT_CONFIG.categories,
-      ollamaEndpoint: parsed.ollamaEndpoint ?? DEFAULT_CONFIG.ollamaEndpoint,
+      ollamaEndpoint: normalizeOllamaEndpoint(parsed.ollamaEndpoint, allowRemoteOllama),
+      allowRemoteOllama,
       ollamaModel: parsed.ollamaModel ?? DEFAULT_CONFIG.ollamaModel,
       ollamaEnabled: parsed.ollamaEnabled ?? DEFAULT_CONFIG.ollamaEnabled,
       customPatterns: parsed.customPatterns ?? DEFAULT_CONFIG.customPatterns,

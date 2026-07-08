@@ -96,10 +96,11 @@ Config file: `~/.claude/pii-filter.json` (created by `cloakroom init`, overwritt
 |---|---|---|
 | `enabled` | `true` | Master on/off switch. When `false`, neither masking nor restoration runs |
 | `categories` | `["EMAIL","PHONE","ADDRESS","API_KEY","CREDIT_CARD","MY_NUMBER","NAME","ORG","SCHOOL","SSN","IP_ADDRESS","POSTAL_CODE"]` | Enabled PII categories. Of the 13 defined categories, `URL_USER` (Basic-auth-style userinfo in a URL) is not included by default and must be added explicitly |
-| `ollamaEndpoint` | `"http://localhost:11434"` | Ollama API endpoint |
+| `ollamaEndpoint` | `"http://localhost:11434"` | Ollama API endpoint. By default, only `localhost`, `127.*`, and `::1` are allowed |
+| `allowRemoteOllama` | `false` | Allows remote Ollama endpoints when set to `true`. Use only with trusted hosts because unmasked proper nouns may be sent there |
 | `ollamaModel` | `"gemma3:4b"` | Ollama model to use |
 | `ollamaEnabled` | `false` | Whether Ollama-backed `NAME`/`ORG`/`SCHOOL` detection runs (optional feature, disabled by default) |
-| `customPatterns` | `[]` | Extra regex patterns ({`name`, `pattern`}). **Matches are always registered under the `NAME` category** (the `name` field is kept only as a label, not used for categorization) |
+| `customPatterns` | `[]` | Extra regex patterns ({`name`, `pattern`, `category?`}). Uses `category` when provided, otherwise uses `name` as the category |
 | `dictionary` | `[]` | Known exact-match values ({`text`, `category`}). Evaluated before regex and Ollama |
 | `allowlist` | `[]` | Exact-match strings that are never masked, even if detected |
 
@@ -115,14 +116,14 @@ Environment variables:
 
 ```
 cloakroom start
-cloakroom init [--yes] [--force]
+cloakroom init [--force]
 cloakroom install --for=claude-code
 cloakroom status
 cloakroom test
 ```
 
 - `start` — spawns `dist/server.js` as a child process
-- `init [--force]` — creates `~/.claude/pii-filter.json`. Does nothing if it already exists and `--force` is not passed (`--yes` is listed in the help text but is currently unused by the implementation)
+- `init [--force]` — creates `~/.claude/pii-filter.json`. Does nothing if it already exists and `--force` is not passed
 - `install --for=claude-code` — writes the `~/.claude/.env` settings described above. Any other `--for` value throws an error
 - `status` — hits `/health` and `/control/status` and prints the combined result as JSON; exits with code 1 if the proxy is unreachable
 - `test` — runs a sample text through the filter with Ollama disabled, printing the result, as a quick sanity check
@@ -177,9 +178,8 @@ Requests to any other path are passed through untouched (defaulting to Anthropic
 - With Ollama disabled (the default), proper nouns such as names, organizations, and schools are only masked if registered in `dictionary` / `customPatterns` (no automatic detection). Set `ollamaEnabled: true` to enable automatic detection
 - Ollama detection does not apply to the system prompt (the `system` field only goes through dictionary and regex filtering)
 - Ollama's 4B model is not perfectly accurate for name/org/school detection; false positives and misses can occur. Detection has a timeout budget of roughly 4 seconds and adds latency per new content block
+- When remote Ollama is enabled, unmasked text such as proper nouns may be sent to that host. Non-loopback `ollamaEndpoint` values are rejected by default; set `allowRemoteOllama: true` only when the host is trusted
 - Runtime controls (passthrough, per-category disable) are process-wide, not per-session, and reset when the server restarts
 - For clients that do not send an explicit session ID header, the mapping only lives as long as the TCP connection stays open; once it drops, previously issued placeholders can no longer be restored
-- Matches from `customPatterns` are always tagged as `NAME`, regardless of the pattern's given `name`
 - Paths other than `/v1/messages` and `/v1/chat/completions` are proxied without any PII filtering
 - Masking PII inside source code can affect code-generation accuracy
-- The `input` field of an assistant `tool_use` block is not filtered (by design, `filterContent` in `src/piiFilter.ts` passes it through untouched). When conversation history is resent, raw PII embedded in tool call arguments (e.g., file paths containing real names) is sent upstream unmasked

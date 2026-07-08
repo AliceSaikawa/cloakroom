@@ -20,7 +20,7 @@ function printHelp(): void {
 
 Usage:
   cloakroom start
-  cloakroom init [--yes] [--force]
+  cloakroom init [--force]
   cloakroom install --for=claude-code
   cloakroom status
   cloakroom test

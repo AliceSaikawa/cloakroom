@@ -46,7 +46,9 @@ async function loadActualModules() {
     actualModuleCachePromise = (async () => {
       const bundleDir = mkdtempSync(join(tmpdir(), 'cloakroom-test-'))
       const entries = [
+        ['config.ts', 'config.mjs'],
         ['controlState.ts', 'controlState.mjs'],
+        ['piiFilter.ts', 'piiFilter.mjs'],
         ['provider.ts', 'provider.mjs'],
         ['streamRestorer.ts', 'streamRestorer.mjs'],
         ['openaiStreamRestorer.ts', 'openaiStreamRestorer.mjs'],
@@ -67,14 +69,16 @@ async function loadActualModules() {
           )
         }
 
-        const [controlState, provider, anthropicStream, openaiStream] = await Promise.all([
+        const [config, controlState, piiFilter, provider, anthropicStream, openaiStream] = await Promise.all([
+          import(pathToFileURL(join(bundleDir, 'config.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'controlState.mjs')).href),
+          import(pathToFileURL(join(bundleDir, 'piiFilter.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'provider.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'streamRestorer.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'openaiStreamRestorer.mjs')).href),
         ])
 
-        return { controlState, provider, anthropicStream, openaiStream, bundleDir }
+        return { config, controlState, piiFilter, provider, anthropicStream, openaiStream, bundleDir }
       } catch (error) {
         rmSync(bundleDir, { recursive: true, force: true })
         throw error
@@ -561,6 +565,141 @@ async function testControlState() {
   console.log('#13 Runtime control state: OK')
 }
 
+async function testAdvancedSafetyRegressions() {
+  console.log('\n=== Advanced Safety Regressions ===')
+
+  const { config, piiFilter } = await loadActualModules()
+  const baseConfig = {
+    enabled: true,
+    mode: 'pseudonymize',
+    categories: ['EMAIL', 'PHONE', 'NAME'],
+    ollamaEndpoint: 'http://localhost:11434',
+    allowRemoteOllama: false,
+    ollamaModel: 'gemma3:4b',
+    ollamaEnabled: false,
+    customPatterns: [],
+    customCategories: [],
+    dictionary: TEST_DICTIONARY,
+    allowlist: [],
+    auditLog: {
+      enabled: false,
+      destination: 'stderr',
+      reviewThreshold: 0.8,
+    },
+  }
+
+  {
+    const filter = new piiFilter.PIIFilter(baseConfig)
+    const filtered = await filter.filterRequestBody({
+      messages: [
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'tool_use',
+              id: 'toolu_test',
+              name: 'read_file',
+              input: {
+                path: `/Users/${TEST_PII.dictName}/Documents/notes.txt`,
+                email: TEST_PII.email,
+                nested: [`call ${TEST_PII.phone}`],
+              },
+            },
+          ],
+        },
+      ],
+    })
+
+    const input = filtered.messages[0].content[0].input
+    const serialized = JSON.stringify(input)
+    assert.ok(!serialized.includes(TEST_PII.dictName), '#50: tool_use.input path should be masked')
+    assert.ok(!serialized.includes(TEST_PII.email), '#50: tool_use.input email should be masked')
+    assert.ok(!serialized.includes(TEST_PII.phone), '#50: tool_use.input nested strings should be masked')
+    assert.ok(serialized.includes('[NAME_') && serialized.includes('[EMAIL_') && serialized.includes('[PHONE_'))
+    console.log('#50 tool_use.input filtering: OK')
+  }
+
+  {
+    const filter = new piiFilter.PIIFilter({
+      ...baseConfig,
+      categories: [],
+      dictionary: [],
+      customPatterns: [{ name: 'EMPLOYEE_ID', pattern: 'EMP-\\d{4}' }],
+    })
+    const filtered = await filter.filterRequestBody({
+      messages: [{ role: 'user', content: '社員番号は EMP-1234 です。' }],
+    })
+
+    const content = filtered.messages[0].content
+    assert.ok(content.includes('[EMPLOYEE_ID_1]'), '#51: customPatterns should use custom category names')
+    assert.ok(!content.includes('[NAME_'), '#51: customPatterns should not fall back to NAME')
+    console.log('#51 customPatterns category: OK')
+  }
+
+  {
+    const longCategory = 'VERY_LONG_CUSTOM_CATEGORY_FOR_STREAM_RESTORE'
+    const secret = 'SECRET-12345'
+    const filter = new piiFilter.PIIFilter({
+      ...baseConfig,
+      categories: [],
+      dictionary: [],
+      customPatterns: [{ name: longCategory, pattern: 'SECRET-\\d{5}' }],
+    })
+    const filtered = await filter.filterRequestBody({
+      messages: [{ role: 'user', content: `値は ${secret} です。` }],
+    })
+    const placeholder = filtered.messages[0].content.match(/\[[^\]]+\]/)?.[0]
+    assert.ok(placeholder && placeholder.length > 32, '#19: test should create a long placeholder')
+
+    const restorer = filter.createStreamRestorer()
+    const splitAt = Math.floor(placeholder.length / 2)
+    const output =
+      restorer.processChunk(
+        [
+          'event: content_block_delta',
+          `data: ${JSON.stringify({
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'text_delta', text: `値は ${placeholder.slice(0, splitAt)}` },
+          })}`,
+          '',
+          'event: content_block_delta',
+          `data: ${JSON.stringify({
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'text_delta', text: `${placeholder.slice(splitAt)} です。` },
+          })}`,
+          '',
+          'event: message_stop',
+          'data: {"type":"message_stop"}',
+          '',
+        ].join('\n'),
+      ) + restorer.flush()
+
+    assert.ok(output.includes(secret), '#19: long split placeholder should be restored in streams')
+    console.log('#19 long custom placeholder stream restore: OK')
+  }
+
+  {
+    assert.equal(
+      config.normalizeOllamaEndpoint('https://example.com:11434/ollama', false),
+      'http://localhost:11434',
+      '#53: remote Ollama endpoint should be rejected by default',
+    )
+    assert.equal(
+      config.normalizeOllamaEndpoint('https://example.com:11434/ollama', true),
+      'https://example.com:11434',
+      '#53: explicit opt-in should allow remote Ollama endpoint',
+    )
+    assert.equal(
+      config.normalizeOllamaEndpoint('http://127.0.0.1:11434/api', false),
+      'http://127.0.0.1:11434',
+      '#53: loopback Ollama endpoint should be accepted',
+    )
+    console.log('#53 Ollama endpoint validation: OK')
+  }
+}
+
 // ============================================================
 // Scenario 2: Filter OFF
 // ============================================================
@@ -753,6 +892,7 @@ try {
   await testProviderRouting()
   await testStreamRestorers()
   await testControlState()
+  await testAdvancedSafetyRegressions()
 
   if (runProxy) {
     await testActualProxy()

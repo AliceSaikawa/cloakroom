@@ -96,10 +96,11 @@ OPENAI_BASE_URL=http://127.0.0.1:8787/v1
 |---|---|---|
 | `enabled` | `true` | フィルタ全体の有効/無効。`false` ならマスク・復元とも行わない |
 | `categories` | `["EMAIL","PHONE","ADDRESS","API_KEY","CREDIT_CARD","MY_NUMBER","NAME","ORG","SCHOOL","SSN","IP_ADDRESS","POSTAL_CODE"]` | 有効化するPIIカテゴリ。定義済み全13種のうち `URL_USER`(URL内Basic認証情報)は既定では含まれず、使うには明示的に追加する必要がある |
-| `ollamaEndpoint` | `"http://localhost:11434"` | Ollama APIのエンドポイント |
+| `ollamaEndpoint` | `"http://localhost:11434"` | Ollama APIのエンドポイント。既定では `localhost` / `127.*` / `::1` のみ許可される |
+| `allowRemoteOllama` | `false` | `true` にするとリモートOllamaエンドポイントを許可する。未マスクの固有名詞が送信され得るため、信頼できるホストに限定する |
 | `ollamaModel` | `"gemma3:4b"` | 使用するOllamaモデル |
 | `ollamaEnabled` | `false` | Ollamaによる `NAME`/`ORG`/`SCHOOL` 検出を使うか(デフォルト無効のオプション機能) |
-| `customPatterns` | `[]` | 追加の正規表現({`name`, `pattern`})。**マッチした値は常に `NAME` カテゴリとして登録される**(`name` フィールドはラベルとしてのみ保持され、カテゴリには使われない) |
+| `customPatterns` | `[]` | 追加の正規表現({`name`, `pattern`, `category?`})。`category` があればそのカテゴリ、なければ `name` をカテゴリ名として使う |
 | `dictionary` | `[]` | 完全一致で検出する既知の値({`text`, `category`})。正規表現・Ollamaより先に評価される |
 | `allowlist` | `[]` | ここに含まれる文字列(完全一致)は検出されてもマスクされない |
 
@@ -115,14 +116,14 @@ OPENAI_BASE_URL=http://127.0.0.1:8787/v1
 
 ```
 cloakroom start
-cloakroom init [--yes] [--force]
+cloakroom init [--force]
 cloakroom install --for=claude-code
 cloakroom status
 cloakroom test
 ```
 
 - `start` — `dist/server.js` を子プロセスとして起動する
-- `init [--force]` — `~/.claude/pii-filter.json` を作成。既に存在し `--force` が無ければ何もしない(`--yes` はヘルプに記載されているが現時点の実装では未使用)
+- `init [--force]` — `~/.claude/pii-filter.json` を作成。既に存在し `--force` が無ければ何もしない
 - `install --for=claude-code` — 上記の `~/.claude/.env` 書き込みを行う。`--for=claude-code` 以外の値はエラーになる
 - `status` — `/health` と `/control/status` を叩いて結果をJSONで表示。プロキシに到達できなければエラー終了(終了コード1)
 - `test` — Ollamaを使わない設定でサンプルテキストをフィルタし、結果を表示する動作確認コマンド
@@ -177,9 +178,8 @@ curl -X POST http://127.0.0.1:8787/control/disable/PHONE
 - Ollama無効時(デフォルト)は、人名・組織名・学校名などの固有名詞は `dictionary` / `customPatterns` に登録したものだけがマスクされる(自動検出はしない)。自動検出を使うには `ollamaEnabled: true` で有効化する
 - Ollama検出はシステムプロンプトには適用されない(system フィールドは辞書・正規表現のみ)
 - Ollamaの4Bモデルによる人名/組織名/学校名検出は完全ではなく、誤検出・検出漏れが起こり得る。検出には最大4秒程度のタイムアウト予算があり、新規コンテンツごとにレイテンシが追加される
+- リモートOllamaを使う場合、固有名詞など未マスクのテキストがそのホストへ送信され得る。既定ではloopback以外の `ollamaEndpoint` は拒否され、必要な場合のみ `allowRemoteOllama: true` で明示的に許可する
 - passthrough/カテゴリ無効化などの実行時制御状態はプロセス全体で共有され、セッションごとの制御はできない。サーバー再起動でリセットされる
 - 明示的なセッションIDヘッダを送らないクライアントでは、マッピングはTCP接続が維持されている間のみ有効。接続が切れると、以前発行したプレースホルダは復元できなくなる
-- `customPatterns` でマッチした値は指定した `name` に関わらず常に `NAME` カテゴリとして扱われる
 - `/v1/messages` と `/v1/chat/completions` 以外のパスはPIIフィルタなしで透過プロキシされる
 - ソースファイル内のPIIがマスクされることで、コード生成の精度に影響が出る場合がある
-- アシスタントの`tool_use`ブロックの`input`フィールドはフィルタ対象外(`src/piiFilter.ts`の`filterContent`が素通しする設計)。会話履歴の再送時、ツール呼び出し引数に含まれる生PII(実名入りのファイルパス等)はマスクされずに上流APIへ送信される

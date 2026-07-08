@@ -219,12 +219,36 @@ export class PIIFilter {
         } else if (Array.isArray(out['content'])) {
           out['content'] = await this.filterContent(out['content'], useOllama)
         }
+      } else if (out['type'] === 'tool_use' && 'input' in out) {
+        out['input'] = await this.filterInputValue(out['input'], useOllama)
       }
 
       filteredBlocks.push(out)
     }
 
     return filteredBlocks
+  }
+
+  private async filterInputValue(value: unknown, useOllama: boolean): Promise<unknown> {
+    if (typeof value === 'string') return this.filterText(value, useOllama)
+
+    if (Array.isArray(value)) {
+      const output: unknown[] = []
+      for (const item of value) {
+        output.push(await this.filterInputValue(item, useOllama))
+      }
+      return output
+    }
+
+    if (value && typeof value === 'object') {
+      const output: Record<string, unknown> = {}
+      for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+        output[key] = await this.filterInputValue(item, useOllama)
+      }
+      return output
+    }
+
+    return value
   }
 
   private async filterText(text: string, useOllama: boolean): Promise<string> {
