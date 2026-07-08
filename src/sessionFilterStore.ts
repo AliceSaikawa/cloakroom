@@ -20,7 +20,7 @@ function shouldResetSession(req: IncomingMessage): boolean {
 
 export class SessionFilterStore {
   private readonly explicitSessions = new Map<string, SessionEntry>()
-  private readonly socketSessions = new WeakMap<Socket, PIIFilter>()
+  private socketSessions = new WeakMap<Socket, PIIFilter>()
 
   acquire(req: IncomingMessage): PIIFilter {
     this.pruneExpiredSessions()
@@ -37,6 +37,11 @@ export class SessionFilterStore {
       this.socketSessions.delete(req.socket)
     }
     return this.acquireSocketSession(req.socket)
+  }
+
+  clear(): void {
+    this.explicitSessions.clear()
+    this.socketSessions = new WeakMap<Socket, PIIFilter>()
   }
 
   private acquireExplicitSession(sessionId: string): PIIFilter {

@@ -1,11 +1,49 @@
 import { loadPIIConfig } from './config.js'
 import { getActiveCategories, isPassthroughEnabled } from './controlState.js'
+import { writeAuditLog } from './auditLog.js'
 import { MappingTable } from './mappingTable.js'
 import { detectOllamaPII } from './ollamaFilter.js'
 import { OpenAIStreamRestorer } from './openaiStreamRestorer.js'
-import { applyReplacements, detectDictionaryPII, detectRegexPII } from './regexFilter.js'
+import {
+  applyReplacements,
+  detectDictionaryPII,
+  detectRegexPII,
+  selectNonOverlappingMatches,
+} from './regexFilter.js'
 import { StreamRestorer } from './streamRestorer.js'
-import type { PIICategory, PIIFilterConfig } from './types.js'
+import type { CustomPatternEntry, DictionaryEntry, PIICategory, PIIFilterConfig, PIIMatch } from './types.js'
+
+function getCustomCategoryNames(config: PIIFilterConfig): readonly PIICategory[] {
+  return config.customCategories
+    .filter((category) => category.enabled !== false)
+    .map((category) => category.name)
+}
+
+function getConfiguredCategories(config: PIIFilterConfig): readonly PIICategory[] {
+  const customPatternCategories = config.customPatterns.map((pattern) => pattern.category ?? pattern.name)
+  return [...new Set([...config.categories, ...getCustomCategoryNames(config), ...customPatternCategories])]
+}
+
+function getCustomDictionary(config: PIIFilterConfig): readonly DictionaryEntry[] {
+  return config.customCategories.flatMap((category) => {
+    if (category.enabled === false) return []
+    return (category.dictionary ?? []).map((text) => ({ text, category: category.name }))
+  })
+}
+
+function getCustomPatterns(config: PIIFilterConfig): readonly CustomPatternEntry[] {
+  return [
+    ...config.customPatterns,
+    ...config.customCategories.flatMap((category) => {
+      if (category.enabled === false) return []
+      return (category.patterns ?? []).map((pattern, index) => ({
+        name: `${category.name}_${index + 1}`,
+        category: category.name,
+        pattern,
+      }))
+    }),
+  ]
+}
 
 export class PIIFilter {
   private readonly mappingTable = new MappingTable()
@@ -46,21 +84,73 @@ export class PIIFilter {
   }
 
   restoreText(text: string): string {
+    if (this.config.mode === 'anonymize') return text
     return this.mappingTable.replaceAllPlaceholders(text)
   }
 
   restoreResponseBody<T>(payload: T): T {
     if (!this.isEnabled()) return payload
+    if (this.config.mode === 'anonymize') return payload
     return this.restoreRecursive(payload) as T
+  }
+
+  async analyzeText(text: string, options: { readonly useOllama?: boolean } = {}): Promise<readonly PIIMatch[]> {
+    if (!text.trim()) return []
+
+    const categories = getActiveCategories(getConfiguredCategories(this.config))
+    if (categories.length === 0) return []
+
+    const matches: PIIMatch[] = [
+      ...detectDictionaryPII(text, categories, [...this.config.dictionary, ...getCustomDictionary(this.config)]),
+      ...detectRegexPII(text, categories, getCustomPatterns(this.config)),
+    ]
+
+    if (options.useOllama && this.config.ollamaEnabled) {
+      matches.push(
+        ...(await detectOllamaPII(
+          [{ index: 0, text }],
+          this.config.ollamaEndpoint,
+          this.config.ollamaModel,
+          categories,
+        )),
+      )
+    }
+
+    return selectNonOverlappingMatches(matches)
+      .filter((match) => !this.allowlist.has(match.text))
+      .sort((left, right) => left.start - right.start)
   }
 
   reset(): void {
     this.mappingTable.clear()
   }
 
-  private registerMaskedValue(original: string, category: PIICategory): string {
-    if (this.allowlist.has(original)) return original
-    return this.mappingTable.register(original, category)
+  private registerMaskedMatch(match: PIIMatch): string {
+    if (this.allowlist.has(match.text)) return match.text
+
+    const isReversible = this.config.mode !== 'anonymize'
+    const customCategory = this.config.customCategories.find((item) => item.name === match.category)
+    const placeholder = this.mappingTable.register(
+      match.text,
+      match.category,
+      customCategory?.placeholder ?? customCategory?.label ?? String(match.category),
+      isReversible,
+    )
+
+    writeAuditLog(this.config.auditLog, {
+      timestamp: new Date().toISOString(),
+      category: match.category,
+      placeholder,
+      confidence: match.confidence,
+      position: {
+        start: match.start,
+        end: match.end,
+      },
+      mode: this.config.mode,
+      reviewRequired: match.confidence < this.config.auditLog.reviewThreshold,
+    })
+
+    return placeholder
   }
 
   private async filterMessages(messages: readonly unknown[]): Promise<unknown[]> {
@@ -141,18 +231,18 @@ export class PIIFilter {
     if (!text.trim()) return text
 
     let filtered = text
-    const categories = getActiveCategories(this.config.categories)
+    const categories = getActiveCategories(getConfiguredCategories(this.config))
     if (categories.length === 0) return filtered
 
     const dictionaryMatches = detectDictionaryPII(
       filtered,
       categories,
-      this.config.dictionary,
+      [...this.config.dictionary, ...getCustomDictionary(this.config)],
     )
-    filtered = applyReplacements(filtered, dictionaryMatches, this.registerMaskedValue.bind(this))
+    filtered = applyReplacements(filtered, dictionaryMatches, this.registerMaskedMatch.bind(this))
 
-    const regexMatches = detectRegexPII(filtered, categories, this.config.customPatterns)
-    filtered = applyReplacements(filtered, regexMatches, this.registerMaskedValue.bind(this))
+    const regexMatches = detectRegexPII(filtered, categories, getCustomPatterns(this.config))
+    filtered = applyReplacements(filtered, regexMatches, this.registerMaskedMatch.bind(this))
 
     if (this.config.ollamaEnabled && useOllama) {
       const ollamaMatches = await detectOllamaPII(
@@ -163,7 +253,7 @@ export class PIIFilter {
       )
 
       if (ollamaMatches.length > 0) {
-        filtered = applyReplacements(filtered, ollamaMatches, this.registerMaskedValue.bind(this))
+        filtered = applyReplacements(filtered, ollamaMatches, this.registerMaskedMatch.bind(this))
       }
     }
 

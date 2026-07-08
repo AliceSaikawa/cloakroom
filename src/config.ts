@@ -18,15 +18,31 @@ export function loadPIIConfig(): PIIFilterConfig {
   try {
     const raw = readFileSync(CONFIG_PATH, 'utf8')
     const parsed = JSON.parse(raw)
+    const auditLog = {
+      ...DEFAULT_CONFIG.auditLog,
+      ...(parsed.auditLog ?? {}),
+    }
+
     loadedConfig = {
       enabled: parsed.enabled ?? DEFAULT_CONFIG.enabled,
+      mode: parsed.mode === 'anonymize' ? 'anonymize' : DEFAULT_CONFIG.mode,
       categories: parsed.categories ?? DEFAULT_CONFIG.categories,
       ollamaEndpoint: parsed.ollamaEndpoint ?? DEFAULT_CONFIG.ollamaEndpoint,
       ollamaModel: parsed.ollamaModel ?? DEFAULT_CONFIG.ollamaModel,
       ollamaEnabled: parsed.ollamaEnabled ?? DEFAULT_CONFIG.ollamaEnabled,
       customPatterns: parsed.customPatterns ?? DEFAULT_CONFIG.customPatterns,
+      customCategories: parsed.customCategories ?? DEFAULT_CONFIG.customCategories,
       dictionary: parsed.dictionary ?? DEFAULT_CONFIG.dictionary,
       allowlist: parsed.allowlist ?? DEFAULT_CONFIG.allowlist,
+      auditLog: {
+        enabled: Boolean(auditLog.enabled),
+        destination: auditLog.destination === 'file' ? 'file' : 'stderr',
+        path: typeof auditLog.path === 'string' ? auditLog.path : undefined,
+        reviewThreshold:
+          typeof auditLog.reviewThreshold === 'number'
+            ? auditLog.reviewThreshold
+            : DEFAULT_CONFIG.auditLog.reviewThreshold,
+      },
     }
   } catch {
     loadedConfig = DEFAULT_CONFIG
@@ -37,4 +53,9 @@ export function loadPIIConfig(): PIIFilterConfig {
 
 export function resetPIIConfigCache(): void {
   loadedConfig = null
+}
+
+export function reloadPIIConfig(): PIIFilterConfig {
+  resetPIIConfigCache()
+  return loadPIIConfig()
 }

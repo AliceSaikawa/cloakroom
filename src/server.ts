@@ -10,9 +10,11 @@ import {
   setPassthroughEnabled,
   togglePassthrough,
 } from './controlState.js'
-import { loadPIIConfig } from './config.js'
+import { loadPIIConfig, reloadPIIConfig } from './config.js'
+import { PIIFilter } from './piiFilter.js'
 import { resolveProvider, shouldFilterMessagesPath } from './provider.js'
 import { SessionFilterStore } from './sessionFilterStore.js'
+import type { PIICategory, PIIFilterConfig } from './types.js'
 
 const DEFAULT_PORT = 8787
 const sessionFilters = new SessionFilterStore()
@@ -58,13 +60,36 @@ function writeJson(res: ServerResponse, statusCode: number, payload: unknown): v
   res.end(JSON.stringify(payload))
 }
 
+function getConfiguredCategories(config: PIIFilterConfig): readonly PIICategory[] {
+  const customCategories = config.customCategories
+    .filter((category) => category.enabled !== false)
+    .map((category) => category.name)
+  const customPatternCategories = config.customPatterns.map((pattern) => pattern.category ?? pattern.name)
+  return [...new Set([...config.categories, ...customCategories, ...customPatternCategories])]
+}
+
+function isConfiguredCategory(category: string, config: PIIFilterConfig): category is PIICategory {
+  return (
+    isKnownPIICategory(category) ||
+    config.customCategories.some((item) => item.name === category) ||
+    config.customPatterns.some((item) => (item.category ?? item.name) === category)
+  )
+}
+
+function reloadRuntimeConfig(): void {
+  reloadPIIConfig()
+  // Existing session filters keep their own config snapshots, so reload starts
+  // fresh sessions for requests after the config change.
+  sessionFilters.clear()
+}
+
 function writeControlStatus(res: ServerResponse): void {
   const status = getControlStatus()
   const config = loadPIIConfig()
   writeJson(res, 200, {
     ...status,
     filterEnabled: config.enabled && !status.passthroughEnabled,
-    activeCategories: getActiveCategories(config.categories),
+    activeCategories: getActiveCategories(getConfiguredCategories(config)),
   })
 }
 
@@ -97,10 +122,16 @@ function handleControlRequest(req: IncomingMessage, res: ServerResponse): boolea
     return true
   }
 
+  if (req.method === 'POST' && path === '/control/reload') {
+    reloadRuntimeConfig()
+    writeControlStatus(res)
+    return true
+  }
+
   if (req.method === 'POST') {
     const disabledCategory = getControlCategory(req, '/control/disable/')
     if (disabledCategory) {
-      if (!isKnownPIICategory(disabledCategory)) {
+      if (!isConfiguredCategory(disabledCategory, loadPIIConfig())) {
         writeJson(res, 400, { error: `Unknown PII category: ${disabledCategory}` })
         return true
       }
@@ -112,7 +143,7 @@ function handleControlRequest(req: IncomingMessage, res: ServerResponse): boolea
 
     const enabledCategory = getControlCategory(req, '/control/enable/')
     if (enabledCategory) {
-      if (!isKnownPIICategory(enabledCategory)) {
+      if (!isConfiguredCategory(enabledCategory, loadPIIConfig())) {
         writeJson(res, 400, { error: `Unknown PII category: ${enabledCategory}` })
         return true
       }
@@ -124,6 +155,30 @@ function handleControlRequest(req: IncomingMessage, res: ServerResponse): boolea
   }
 
   return false
+}
+
+async function handleAnalyze(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const rawBody = await readBody(req)
+
+  let parsedBody: Record<string, unknown>
+  try {
+    parsedBody = JSON.parse(rawBody.toString('utf8')) as Record<string, unknown>
+  } catch {
+    writeJson(res, 400, { error: 'Invalid JSON body' })
+    return
+  }
+
+  if (typeof parsedBody['text'] !== 'string') {
+    writeJson(res, 400, { error: 'Expected JSON body with a string "text" field' })
+    return
+  }
+
+  const filter = new PIIFilter()
+  const detections = await filter.analyzeText(parsedBody['text'], {
+    useOllama: parsedBody['useOllama'] === true,
+  })
+
+  writeJson(res, 200, { detections })
 }
 
 type StreamRestorerLike = {
@@ -286,6 +341,11 @@ const server = createServer(async (req, res) => {
       return
     }
 
+    if (req.method === 'POST' && req.url?.split('?')[0] === '/analyze') {
+      await handleAnalyze(req, res)
+      return
+    }
+
     if (shouldFilterMessagesPath(req)) {
       await handleMessages(req, res)
       return
@@ -310,6 +370,11 @@ process.on('SIGUSR1', () => {
   const status = togglePassthrough()
   const mode = status.passthroughEnabled ? 'passthrough' : 'filtering'
   process.stdout.write(`PII proxy control mode: ${mode}\n`)
+})
+
+process.on('SIGHUP', () => {
+  reloadRuntimeConfig()
+  process.stdout.write('PII proxy config reloaded\n')
 })
 
 process.on('SIGINT', () => {

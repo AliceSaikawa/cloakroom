@@ -1,6 +1,5 @@
 import type { MappingTable } from './mappingTable.js'
 
-const PLACEHOLDER_PATTERN = /^\[[A-Z_]+_\d+\]$/
 const MIN_PENDING_BUFFER = 32
 
 export class TextDeltaRestorer {
@@ -39,11 +38,7 @@ export class TextDeltaRestorer {
       }
 
       const candidate = this.pending.slice(0, closeIdx + 1)
-      if (PLACEHOLDER_PATTERN.test(candidate)) {
-        output += this.mappingTable.resolve(candidate) ?? candidate
-      } else {
-        output += candidate
-      }
+      output += this.mappingTable.resolve(candidate) ?? candidate
       this.pending = this.pending.slice(closeIdx + 1)
     }
 

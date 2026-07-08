@@ -187,6 +187,7 @@ function parseDetections(
         category: det.category,
         start: idx,
         end: idx + normalizedText.length,
+        confidence: 0.8,
       })
       searchStart = idx + normalizedText.length
     }
