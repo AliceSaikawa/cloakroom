@@ -47,6 +47,7 @@ async function loadActualModules() {
       const bundleDir = mkdtempSync(join(tmpdir(), 'cloakroom-test-'))
       const entries = [
         ['controlState.ts', 'controlState.mjs'],
+        ['piiFilter.ts', 'piiFilter.mjs'],
         ['provider.ts', 'provider.mjs'],
         ['streamRestorer.ts', 'streamRestorer.mjs'],
         ['openaiStreamRestorer.ts', 'openaiStreamRestorer.mjs'],
@@ -67,14 +68,15 @@ async function loadActualModules() {
           )
         }
 
-        const [controlState, provider, anthropicStream, openaiStream] = await Promise.all([
+        const [controlState, piiFilter, provider, anthropicStream, openaiStream] = await Promise.all([
           import(pathToFileURL(join(bundleDir, 'controlState.mjs')).href),
+          import(pathToFileURL(join(bundleDir, 'piiFilter.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'provider.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'streamRestorer.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'openaiStreamRestorer.mjs')).href),
         ])
 
-        return { controlState, provider, anthropicStream, openaiStream, bundleDir }
+        return { controlState, piiFilter, provider, anthropicStream, openaiStream, bundleDir }
       } catch (error) {
         rmSync(bundleDir, { recursive: true, force: true })
         throw error
@@ -561,6 +563,96 @@ async function testControlState() {
   console.log('#13 Runtime control state: OK')
 }
 
+async function testPrivacyControlFeatures() {
+  console.log('\n=== Privacy Control Features ===')
+
+  const { piiFilter } = await loadActualModules()
+  const baseConfig = {
+    enabled: true,
+    mode: 'pseudonymize',
+    categories: ['EMAIL', 'NAME'],
+    ollamaEndpoint: 'http://localhost:11434',
+    ollamaModel: 'gemma3:4b',
+    ollamaEnabled: false,
+    customPatterns: [],
+    customCategories: [],
+    dictionary: TEST_DICTIONARY,
+    allowlist: [],
+    auditLog: {
+      enabled: false,
+      destination: 'stderr',
+      reviewThreshold: 0.8,
+    },
+  }
+
+  {
+    const tmp = mkdtempSync(join(tmpdir(), 'cloakroom-audit-test-'))
+    const auditPath = join(tmp, 'audit.jsonl')
+    try {
+      const filter = new piiFilter.PIIFilter({
+        ...baseConfig,
+        auditLog: {
+          enabled: true,
+          destination: 'file',
+          path: auditPath,
+          reviewThreshold: 0.95,
+        },
+      })
+
+      await filter.filterRequestBody({
+        messages: [{ role: 'user', content: `山田太郎のメールは${TEST_PII.email}です。` }],
+      })
+
+      const lines = readFileSync(auditPath, 'utf8').trim().split('\n')
+      const entries = lines.map((line) => JSON.parse(line))
+      assert.ok(entries.some((entry) => entry.category === 'NAME'), '#21: audit log should include dictionary matches')
+      assert.ok(entries.some((entry) => entry.category === 'EMAIL'), '#21: audit log should include regex matches')
+      assert.ok(entries.every((entry) => typeof entry.confidence === 'number'), '#21: confidence should be logged')
+      assert.ok(entries.every((entry) => typeof entry.position?.start === 'number'), '#21: match position should be logged')
+      assert.ok(entries.some((entry) => entry.reviewRequired === true), '#21: low confidence matches should be flagged')
+
+      const rawLog = lines.join('\n')
+      assert.ok(!rawLog.includes(TEST_PII.email), '#21: audit log must not contain raw email')
+      assert.ok(!rawLog.includes(TEST_PII.dictName), '#21: audit log must not contain raw name')
+      console.log('#21 confidence score and audit log: OK')
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  }
+
+  {
+    const filter = new piiFilter.PIIFilter({ ...baseConfig, mode: 'anonymize' })
+    const filtered = await filter.filterRequestBody({
+      messages: [
+        {
+          role: 'user',
+          content: `連絡先は${TEST_PII.email}です。再掲: ${TEST_PII.email}`,
+        },
+      ],
+    })
+
+    const content = filtered.messages[0].content
+    const placeholders = content.match(/\[EMAIL_\d+\]/g) ?? []
+    assert.equal(placeholders.length, 2, '#24: repeated PII should be masked every time')
+    assert.equal(new Set(placeholders).size, 1, '#24: same PII should reuse the same placeholder')
+    assert.ok(!content.includes(TEST_PII.email), '#22: anonymize mode should remove raw PII')
+
+    const restored = filter.restoreResponseBody({ text: content })
+    assert.equal(restored.text, content, '#22: anonymize mode should not restore placeholders')
+    console.log('#22/#24 anonymize mode and placeholder context: OK')
+  }
+
+  {
+    const filter = new piiFilter.PIIFilter(baseConfig)
+    const input = `山田太郎のメールは${TEST_PII.email}です。`
+    const detections = await filter.analyzeText(input)
+    assert.ok(detections.some((item) => item.category === 'NAME'), '#23: analyze should report dictionary PII')
+    assert.ok(detections.some((item) => item.category === 'EMAIL'), '#23: analyze should report regex PII')
+    assert.ok(input.includes(TEST_PII.email), '#23: analyze should not mutate the source text')
+    console.log('#23 analyze dry run: OK')
+  }
+}
+
 // ============================================================
 // Scenario 2: Filter OFF
 // ============================================================
@@ -627,7 +719,23 @@ async function testActualProxy() {
     enabledPhoneStatus.activeCategories.includes('PHONE'),
     'Enable category endpoint should restore PHONE to active categories',
   )
+
+  const reloadedStatus = JSON.parse(await httpPost(`${PROXY_URL}/control/reload`, {}, {}))
+  assert.equal(reloadedStatus.filterEnabled, true, '#25: reload endpoint should return control status')
+  assert.ok(reloadedStatus.activeCategories.includes('EMAIL'), '#25: reload should keep fresh config categories active')
   console.log('Control endpoints: OK')
+
+  const analyzeResponse = JSON.parse(await httpPost(
+    `${PROXY_URL}/analyze`,
+    { text: `山田太郎のメールは${TEST_PII.email}です。` },
+    { 'content-type': 'application/json' },
+  ))
+  assert.ok(Array.isArray(analyzeResponse.detections), '#23: analyze endpoint should return detections')
+  assert.ok(
+    analyzeResponse.detections.some((item) => item.category === 'EMAIL'),
+    '#23: analyze endpoint should report email without masking the request',
+  )
+  console.log('Analyze endpoint: OK')
 
   // Send a message containing PII through the proxy (no API key needed for filtering verification)
   const requestBody = {
@@ -753,6 +861,7 @@ try {
   await testProviderRouting()
   await testStreamRestorers()
   await testControlState()
+  await testPrivacyControlFeatures()
 
   if (runProxy) {
     await testActualProxy()
