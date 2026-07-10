@@ -191,12 +191,12 @@ const PATTERNS: readonly PatternDef[] = [
   },
   {
     category: 'DRIVER_LICENSE',
-    pattern: /(?:運転免許証番号|免許証番号|免許番号)[:：]?\s*(\d{12})\b/g,
+    pattern: /(?:運転免許証番号|免許証番号|免許番号)[:：]?\s*(\d{12}|\d{2}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{2})\b/g,
     captureGroup: 1,
   },
   {
     category: 'PASSPORT',
-    pattern: /(?:旅券番号|パスポート番号|Passport(?: No\.)?)[:：]?\s*([A-Z]{2}\d{7})\b/gi,
+    pattern: /(?:旅券番号|パスポート番号|Passport(?: No\.| Number)?)[:：]?\s*([A-Z]{2}\d{7}|\d{9})\b/gi,
     captureGroup: 1,
   },
   {

@@ -50,6 +50,7 @@ async function loadActualModules() {
         ['controlState.ts', 'controlState.mjs'],
         ['piiFilter.ts', 'piiFilter.mjs'],
         ['provider.ts', 'provider.mjs'],
+        ['regexFilter.ts', 'regexFilter.mjs'],
         ['streamRestorer.ts', 'streamRestorer.mjs'],
         ['openaiStreamRestorer.ts', 'openaiStreamRestorer.mjs'],
       ]
@@ -69,16 +70,17 @@ async function loadActualModules() {
           )
         }
 
-        const [config, controlState, piiFilter, provider, anthropicStream, openaiStream] = await Promise.all([
+        const [config, controlState, piiFilter, provider, regexFilter, anthropicStream, openaiStream] = await Promise.all([
           import(pathToFileURL(join(bundleDir, 'config.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'controlState.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'piiFilter.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'provider.mjs')).href),
+          import(pathToFileURL(join(bundleDir, 'regexFilter.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'streamRestorer.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'openaiStreamRestorer.mjs')).href),
         ])
 
-        return { config, controlState, piiFilter, provider, anthropicStream, openaiStream, bundleDir }
+        return { config, controlState, piiFilter, provider, regexFilter, anthropicStream, openaiStream, bundleDir }
       } catch (error) {
         rmSync(bundleDir, { recursive: true, force: true })
         throw error
@@ -700,6 +702,66 @@ async function testAdvancedSafetyRegressions() {
   }
 }
 
+async function testFinancialIdentityRegexCoverage() {
+  console.log('\n=== Financial and Identity Regex Coverage ===')
+
+  const { regexFilter } = await loadActualModules()
+
+  function mask(text, categories) {
+    const matches = regexFilter.detectRegexPII(text, categories)
+    const counters = new Map()
+    const filtered = regexFilter.applyReplacements(text, matches, (match) => {
+      const count = (counters.get(match.category) ?? 0) + 1
+      counters.set(match.category, count)
+      return `[${match.category}_${count}]`
+    })
+    return { matches, filtered }
+  }
+
+  {
+    const valid = 'IBAN: GB29 NWBK 6016 1331 9268 19'
+    const invalid = 'IBAN: GB29 NWBK 6016 1331 9268 18'
+    const validResult = mask(valid, ['IBAN'])
+    const invalidResult = mask(invalid, ['IBAN'])
+    assert.ok(validResult.filtered.includes('[IBAN_1]'), '#29: valid IBAN should be masked')
+    assert.equal(invalidResult.matches.length, 0, '#29: invalid IBAN checksum should be rejected')
+    console.log('#29 IBAN: OK')
+  }
+
+  {
+    const result = mask(
+      '金融機関コード: 0001 支店コード: 001 口座番号: 1234567',
+      ['BANK_ACCOUNT'],
+    )
+    assert.ok(result.filtered.includes('[BANK_ACCOUNT_1]'), '#30: Japanese bank account should be masked')
+    assert.ok(!result.filtered.includes('1234567'), '#30: raw account number should not remain')
+    console.log('#30 BANK_ACCOUNT: OK')
+  }
+
+  {
+    const result = mask('免許証番号: 12-3456-7890-12', ['DRIVER_LICENSE'])
+    assert.ok(result.filtered.includes('[DRIVER_LICENSE_1]'), '#31: hyphenated driver license should be masked')
+    assert.ok(!result.filtered.includes('12-3456-7890-12'), '#31: raw driver license should not remain')
+    console.log('#31 DRIVER_LICENSE: OK')
+  }
+
+  {
+    const japan = mask('パスポート番号: AB1234567', ['PASSPORT'])
+    const us = mask('Passport Number: 123456789', ['PASSPORT'])
+    assert.ok(japan.filtered.includes('[PASSPORT_1]'), '#32: Japanese passport should be masked')
+    assert.ok(us.filtered.includes('[PASSPORT_1]'), '#32: US passport should be masked with context')
+    console.log('#32 PASSPORT: OK')
+  }
+
+  {
+    const bitcoin = mask('BTC: 1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf4', ['CRYPTO_WALLET'])
+    const ethereum = mask('ETH: 0x742d35Cc6634C0532925a3b844Bc454e4438f44e', ['CRYPTO_WALLET'])
+    assert.ok(bitcoin.filtered.includes('[CRYPTO_WALLET_1]'), '#33: Bitcoin wallet should be masked')
+    assert.ok(ethereum.filtered.includes('[CRYPTO_WALLET_1]'), '#33: Ethereum wallet should be masked')
+    console.log('#33 CRYPTO_WALLET: OK')
+  }
+}
+
 // ============================================================
 // Scenario 2: Filter OFF
 // ============================================================
@@ -893,6 +955,7 @@ try {
   await testStreamRestorers()
   await testControlState()
   await testAdvancedSafetyRegressions()
+  await testFinancialIdentityRegexCoverage()
 
   if (runProxy) {
     await testActualProxy()
