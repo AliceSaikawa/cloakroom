@@ -886,6 +886,133 @@ async function testJapanesePlaceholderLabels() {
   }
 }
 
+async function testHeuristicNerDetection() {
+  console.log('\n=== Heuristic NER Detection ===')
+
+  const { piiFilter } = await loadActualModules()
+  const baseConfig = {
+    enabled: true,
+    mode: 'pseudonymize',
+    categories: ['EMAIL', 'NAME', 'ORG', 'SCHOOL'],
+    ollamaEndpoint: 'http://localhost:11434',
+    allowRemoteOllama: false,
+    ollamaModel: 'gemma3:4b',
+    ollamaEnabled: false,
+    heuristicNerEnabled: true,
+    customPatterns: [],
+    customCategories: [],
+    plugins: [],
+    dictionary: [],
+    allowlist: [],
+    auditLog: { enabled: false, destination: 'stderr', reviewThreshold: 0.8 },
+  }
+
+  {
+    const filter = new piiFilter.PIIFilter(baseConfig)
+    const filtered = await filter.filterRequestBody({
+      messages: [{ role: 'user', content: '田中さんと打ち合わせ' }],
+    })
+    const content = filtered.messages[0].content
+    assert.ok(!content.includes('田中'), 'R1: surname before honorific should be masked')
+    assert.ok(content.includes('[人名'), 'R1: should use a NAME placeholder')
+    assert.equal(
+      filter.restoreText(content),
+      '田中さんと打ち合わせ',
+      'R1: restored text should match the original',
+    )
+    console.log('R1 surname + honorific: OK')
+  }
+
+  {
+    const filter = new piiFilter.PIIFilter(baseConfig)
+    const filtered = await filter.filterRequestBody({ messages: [{ role: 'user', content: '山田太郎です' }] })
+    const content = filtered.messages[0].content
+    assert.ok(!content.includes('山田太郎'), 'R3: full name should be masked')
+    assert.ok(content.includes('[人名'), 'R3: should use a NAME placeholder')
+    console.log('R3 full name: OK')
+  }
+
+  {
+    const filter = new piiFilter.PIIFilter(baseConfig)
+    const filtered = await filter.filterRequestBody({ messages: [{ role: 'user', content: '氏名: 珍名一郎' }] })
+    const content = filtered.messages[0].content
+    assert.ok(!content.includes('珍名一郎'), 'R4: labeled name should be masked')
+    assert.ok(content.includes('[人名'), 'R4: should use a NAME placeholder')
+    console.log('R4 labeled name: OK')
+  }
+
+  {
+    const filter = new piiFilter.PIIFilter(baseConfig)
+    const filtered1 = await filter.filterRequestBody({ messages: [{ role: 'user', content: '皆さん' }] })
+    const filtered2 = await filter.filterRequestBody({ messages: [{ role: 'user', content: 'お客さんは' }] })
+    assert.equal(filtered1.messages[0].content, '皆さん', 'denylist: 皆さん should not be masked')
+    assert.equal(filtered2.messages[0].content, 'お客さんは', 'denylist: お客さんは should not be masked')
+    console.log('Denylist (皆さん/お客さんは): OK')
+  }
+
+  {
+    const filter = new piiFilter.PIIFilter(baseConfig)
+    const filtered1 = await filter.filterRequestBody({
+      messages: [{ role: 'user', content: '株式会社テストコーポと契約' }],
+    })
+    const filtered2 = await filter.filterRequestBody({
+      messages: [{ role: 'user', content: 'Acme Widgets Inc. に発注' }],
+    })
+    const content1 = filtered1.messages[0].content
+    const content2 = filtered2.messages[0].content
+    assert.ok(!content1.includes('テストコーポ'), 'ORG: legal-form-prefixed name should be masked')
+    assert.ok(content1.includes('[組織名'), 'ORG: should use an ORG placeholder')
+    assert.ok(!content2.includes('Acme Widgets'), 'ORG: English company name should be masked')
+    assert.ok(content2.includes('[組織名'), 'ORG: should use an ORG placeholder')
+    console.log('ORG detection: OK')
+  }
+
+  {
+    const filter = new piiFilter.PIIFilter(baseConfig)
+    const filtered1 = await filter.filterRequestBody({ messages: [{ role: 'user', content: '私立高校に通う' }] })
+    const filtered2 = await filter.filterRequestBody({ messages: [{ role: 'user', content: '桜丘高等学校' }] })
+    assert.equal(
+      filtered1.messages[0].content,
+      '私立高校に通う',
+      'SCHOOL: generic prefix (私立高校) should not be masked',
+    )
+    const content2 = filtered2.messages[0].content
+    assert.ok(!content2.includes('桜丘高等学校'), 'SCHOOL: named school should be masked')
+    assert.ok(content2.includes('[学校名'), 'SCHOOL: should use a SCHOOL placeholder')
+
+    // Overlap priority: 東都大学 also matches NAME R3 (surname 東 + kanji run),
+    // but the school suffix evidence must win the span.
+    const detections = await new piiFilter.PIIFilter(baseConfig).analyzeText('東都大学の個別事例')
+    const school = detections.find((match) => match.text === '東都大学')
+    assert.equal(school?.category, 'SCHOOL', 'SCHOOL: suffix match should outrank overlapping NAME match')
+    console.log('SCHOOL detection: OK')
+  }
+
+  {
+    const filter = new piiFilter.PIIFilter(baseConfig)
+    const filtered = await filter.filterRequestBody({
+      messages: [{ role: 'user', content: 'Taro Yamada <taro@example.com>' }],
+    })
+    const content = filtered.messages[0].content
+    assert.ok(!content.includes('Taro Yamada'), 'R5: romaji name should not remain as raw text')
+    console.log('R5 romaji name: OK')
+  }
+
+  {
+    const filter = new piiFilter.PIIFilter({ ...baseConfig, heuristicNerEnabled: false })
+    const input = '田中さんが株式会社テストコーポと契約し、桜丘高等学校を卒業した'
+    const filtered = await filter.filterRequestBody({ messages: [{ role: 'user', content: input }] })
+    assert.equal(
+      filtered.messages[0].content,
+      input,
+      'heuristicNerEnabled=false should pass all heuristic candidates through unmasked',
+    )
+    console.log('heuristicNerEnabled=false passthrough: OK')
+  }
+
+  console.log('Heuristic NER Detection PASSED')
+}
+
 async function testFinancialIdentityRegexCoverage() {
   console.log('\n=== Financial and Identity Regex Coverage ===')
 
@@ -1207,6 +1334,7 @@ try {
   await testAdvancedSafetyRegressions()
   await testPrivacyControlFeatures()
   await testJapanesePlaceholderLabels()
+  await testHeuristicNerDetection()
   await testFinancialIdentityRegexCoverage()
   await testSensitiveRecordRegexCoverage()
 

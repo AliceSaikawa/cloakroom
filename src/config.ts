@@ -54,6 +54,7 @@ export function loadPIIConfig(): PIIFilterConfig {
       allowRemoteOllama,
       ollamaModel: parsed.ollamaModel ?? DEFAULT_CONFIG.ollamaModel,
       ollamaEnabled: parsed.ollamaEnabled ?? DEFAULT_CONFIG.ollamaEnabled,
+      heuristicNerEnabled: parsed.heuristicNerEnabled ?? DEFAULT_CONFIG.heuristicNerEnabled,
       customPatterns: parsed.customPatterns ?? DEFAULT_CONFIG.customPatterns,
       customCategories: parsed.customCategories ?? DEFAULT_CONFIG.customCategories,
       plugins: Array.isArray(parsed.plugins)

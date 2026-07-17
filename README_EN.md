@@ -17,7 +17,8 @@ Claude Code / API client
 │                                                     │
 │  1. Dictionary exact match (config.dictionary)      │
 │  2. Regex match (built-in + customPatterns)         │
-│  3. Ollama LLM match (NAME/ORG/SCHOOL, optional)    │
+│  3. Heuristic NER (surname dictionary + context)    │
+│  4. Ollama LLM match (NAME/ORG/SCHOOL, optional)    │
 │       ↓                                             │
 │  Placeholder registration → [メールアドレスA]       │
 │  (per-session MappingTable)                         │
@@ -40,8 +41,8 @@ Claude Code / API client
 Claude Code / API client
 ```
 
-- Detection happens in three stages: **dictionary (exact match) → regex → Ollama LLM (optional)**. The Ollama LLM stage is disabled by default (`ollamaEnabled: false`); when enabled, it only handles the `NAME` / `ORG` / `SCHOOL` categories, and is skipped entirely if none of those are in the active category list.
-- Ollama detection is **not applied to the system prompt** (the `system` field is only filtered by dictionary and regex). Only user/assistant message content and tool results go through Ollama.
+- Detection happens in four stages: **dictionary (exact match) → regex → heuristic NER → Ollama LLM (optional)**. The heuristic NER stage (`heuristicNerEnabled`, defaults to `true`) is a zero-runtime-dependency stage that runs on a built-in surname dictionary, legal-entity suffixes, and school-name suffixes plus contextual rules; it only runs when `NAME` / `ORG` / `SCHOOL` is in the active category list. The Ollama LLM stage is an **optional accuracy-boosting stage**, disabled by default (`ollamaEnabled: false`); when enabled, it only handles the `NAME` / `ORG` / `SCHOOL` categories, and is skipped entirely if none of those are in the active category list.
+- Heuristic NER and Ollama detection are **not applied to the system prompt** (the `system` field is only filtered by dictionary and regex). Only user/assistant message content and tool results go through those stages.
 - Built-in placeholders use Japanese labels plus alphabetic counters (e.g. `[メールアドレスA]`, `[人名B]`). Counters continue from `A` through `Z`, then `AA`. The same original value always reuses the same placeholder. Values in `allowlist` are never masked.
 - The original-value ↔ placeholder mapping is kept **per session**. If a request carries `x-pii-session-id`, `anthropic-session-id`, or `x-session-id`, the mapping is tied to that ID (30-minute TTL); otherwise it lives only as long as the underlying TCP connection stays open. Sending `x-pii-session-reset: 1` discards that session's mapping.
 
@@ -64,7 +65,7 @@ node dist/cli.js start
 
 `npm run build` bundles `src/server.ts` → `dist/server.js` and `src/cli.ts` → `dist/cli.js` (with a shebang) via esbuild. `package.json`'s `bin` maps `cloakroom` to `dist/cli.js`, so linking it globally (e.g. `npm link`) also gives you a `cloakroom` command.
 
-Ollama-backed person/organization/school detection is an **optional feature, disabled by default**. Set `ollamaEnabled: true` in the config file to enable it. When enabled, it requires Ollama itself plus the target model (`gemma3:4b`):
+Automatic detection of names, organizations, and schools is covered by the built-in heuristic NER (enabled by default, `heuristicNerEnabled: true`), which runs with zero runtime dependencies. Ollama-backed detection is an **optional feature that further improves accuracy on top of it**, and is disabled by default. Set `ollamaEnabled: true` in the config file to enable it. When enabled, it requires Ollama itself plus the target model (`gemma3:4b`):
 
 ```bash
 brew install ollama
@@ -114,6 +115,7 @@ Config file: `~/.claude/pii-filter.json` (created by `cloakroom init`, overwritt
 | `allowRemoteOllama` | `false` | Allows remote Ollama endpoints when set to `true`. Use only with trusted hosts because unmasked proper nouns may be sent there |
 | `ollamaModel` | `"gemma3:4b"` | Ollama model to use |
 | `ollamaEnabled` | `false` | Whether Ollama-backed `NAME`/`ORG`/`SCHOOL` detection runs (optional feature, disabled by default) |
+| `heuristicNerEnabled` | `true` | Whether the built-in heuristic NER (surname dictionary + contextual rules for `NAME`/`ORG`/`SCHOOL`) runs. Zero runtime dependencies; set to `false` to disable it |
 | `customPatterns` | `[]` | Extra regex patterns ({`name`, `pattern`, `category?`}). Uses `category` when provided, otherwise uses `name` as the category |
 | `plugins` | `[]` | Absolute paths to local JavaScript modules. Export a plugin with `detect(text)` as `default`, `plugin`, or in `plugins`. For TypeScript on Node 22, use `NODE_OPTIONS=--experimental-strip-types` or compile it to `.mjs` |
 | `dictionary` | `[]` | Known exact-match values ({`text`, `category`}). Evaluated before regex and Ollama |
@@ -177,13 +179,23 @@ Requests to any other path are passed through untouched (defaulting to Anthropic
 
 ## PII categories detected by regex
 
-`EMAIL`, `PHONE` (Japanese and international formats), `ADDRESS` (Japanese addresses), `URL_USER` (credentials embedded in a URL), `API_KEY` (`sk-`, `ghp_`, `gho_`, `github_pat_`, `AKIA`, `xox[bpras]-`, `sk-ant-`, etc.), `CREDIT_CARD` (Luhn-validated), `MY_NUMBER` (Japanese My Number format), `NAME` (only via Git's `Author:`/`Committer:` trailers — general name detection is handled by Ollama), `SSN`, `IP_ADDRESS` (IPv4/IPv6), `POSTAL_CODE`. General detection of `NAME` / `ORG` / `SCHOOL` is handled by the Ollama LLM stage.
+`EMAIL`, `PHONE` (Japanese and international formats), `ADDRESS` (Japanese addresses), `URL_USER` (credentials embedded in a URL), `API_KEY` (`sk-`, `ghp_`, `gho_`, `github_pat_`, `AKIA`, `xox[bpras]-`, `sk-ant-`, etc.), `CREDIT_CARD` (Luhn-validated), `MY_NUMBER` (Japanese My Number format), `NAME` (only via Git's `Author:`/`Committer:` trailers), `SSN`, `IP_ADDRESS` (IPv4/IPv6), `POSTAL_CODE`. General detection of `NAME` / `ORG` / `SCHOOL` is handled by the heuristic NER stage (enabled by default), with the optional Ollama LLM stage further improving accuracy.
+
+## Heuristic NER (built in, no Ollama required)
+
+When `heuristicNerEnabled: true` (the default), this stage runs after regex and before plugins. It uses zero-runtime-dependency static dictionaries (surnames, legal-entity suffixes, school-name suffixes) plus contextual rules, and only runs when `NAME` / `ORG` / `SCHOOL` is in the active category list.
+
+- `NAME`: detects a common Japanese surname (~400 entries) followed by an honorific (さん/様/部長, etc.), a surname plus a short given name forming a full name, labeled contexts like `氏名:`/`担当者:`, and romaji full names such as `Taro Yamada`. Non-name words that happen to precede an honorific (e.g. 皆さん, お客さん) are excluded
+- `ORG`: detects a legal form (`株式会社`, `NPO法人`, etc.) directly attached to a proper noun, either before or after it, as well as English company suffixes like `Acme Widgets Inc.`
+- `SCHOOL`: detects a proper noun directly followed by a school suffix (`大学`, `高等学校`, `専門学校`, etc.). Generic phrases with no proper noun, such as 私立高校 or 国立大学, are excluded
+
+Even with Ollama disabled, this stage provides reasonable automatic coverage of common names, organizations, and schools, though it is not exhaustive — surnames outside the dictionary and unusual organization/school names can still be missed (see Limitations below).
 
 ## Tests
 
 | Command | What it checks | Requires |
 |---|---|---|
-| `node test-pii-filter.mjs` | Filter ON/OFF, bug regressions, provider routing, stream restoration, runtime control | None (bundles source on the fly with esbuild) |
+| `node test-pii-filter.mjs` | Filter ON/OFF, bug regressions, provider routing, stream restoration, runtime control, heuristic NER | None (bundles source on the fly with esbuild) |
 | `node test-pii-filter.mjs --proxy` | Same as above, plus a scenario that hits a running proxy for real | A running proxy and `ANTHROPIC_API_KEY` set |
 | `node test-integrated.mjs` | Accuracy of the full regex + Ollama detection pipeline | Only relevant when running with `ollamaEnabled: true`. **Ollama running locally** with `gemma3:4b` pulled |
 | `node test-hard-cases.mjs` | Hard edge cases for Ollama detection (e.g. names vs. common nouns) | Only relevant when running with `ollamaEnabled: true`. **Ollama running locally** |
@@ -191,8 +203,8 @@ Requests to any other path are passed through untouched (defaulting to Anthropic
 
 ## Limitations
 
-- With Ollama disabled (the default), proper nouns such as names, organizations, and schools are only masked if registered in `dictionary` / `customPatterns` (no automatic detection). Set `ollamaEnabled: true` to enable automatic detection
-- Ollama detection does not apply to the system prompt (the `system` field only goes through dictionary and regex filtering)
+- Heuristic NER is an approximate detector based on static surname/legal-entity/school-suffix dictionaries; surnames outside the dictionary, uncommon organization or school names, and unlisted romaji spellings can be missed. For higher accuracy, combine it with `ollamaEnabled: true` or register known values explicitly in `dictionary` / `customPatterns`
+- Neither heuristic NER nor Ollama detection applies to the system prompt (the `system` field only goes through dictionary and regex filtering)
 - Ollama's 4B model is not perfectly accurate for name/org/school detection; false positives and misses can occur. Detection has a timeout budget of roughly 4 seconds and adds latency per new content block
 - When remote Ollama is enabled, unmasked text such as proper nouns may be sent to that host. Non-loopback `ollamaEndpoint` values are rejected by default; set `allowRemoteOllama: true` only when the host is trusted
 - Runtime controls (passthrough, per-category disable) are process-wide, not per-session, and reset when the server restarts

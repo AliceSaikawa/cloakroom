@@ -114,6 +114,7 @@ export type PIIFilterConfig = {
   readonly allowRemoteOllama: boolean
   readonly ollamaModel: string
   readonly ollamaEnabled: boolean
+  readonly heuristicNerEnabled: boolean
   readonly customPatterns: readonly CustomPatternEntry[]
   readonly customCategories: readonly CustomCategoryConfig[]
   readonly plugins: readonly string[]
@@ -151,6 +152,7 @@ export const DEFAULT_CONFIG: PIIFilterConfig = {
   allowRemoteOllama: false,
   ollamaModel: 'gemma3:4b',
   ollamaEnabled: false,
+  heuristicNerEnabled: true,
   customPatterns: [],
   customCategories: [],
   plugins: [],

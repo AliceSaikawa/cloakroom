@@ -1,6 +1,7 @@
 import { loadPIIConfig } from './config.js'
 import { getActiveCategories, isPassthroughEnabled } from './controlState.js'
 import { writeAuditLog } from './auditLog.js'
+import { detectHeuristicPII } from './heuristicNer.js'
 import { MappingTable } from './mappingTable.js'
 import { detectOllamaPII } from './ollamaFilter.js'
 import { OpenAIStreamRestorer } from './openaiStreamRestorer.js'
@@ -37,6 +38,12 @@ function getCustomDictionary(config: PIIFilterConfig): readonly DictionaryEntry[
     if (category.enabled === false) return []
     return (category.dictionary ?? []).map((text) => ({ text, category: category.name }))
   })
+}
+
+const HEURISTIC_NER_CATEGORIES = new Set(['NAME', 'ORG', 'SCHOOL'])
+
+function wantsHeuristicNer(config: PIIFilterConfig, categories: readonly PIICategory[]): boolean {
+  return config.heuristicNerEnabled && categories.some((category) => HEURISTIC_NER_CATEGORIES.has(category))
 }
 
 function getCustomPatterns(config: PIIFilterConfig): readonly CustomPatternEntry[] {
@@ -115,6 +122,10 @@ export class PIIFilter {
         ...detectDictionaryPII(text, categories, [...this.config.dictionary, ...getCustomDictionary(this.config)]),
         ...detectRegexPII(text, categories, getCustomPatterns(this.config)),
       )
+
+      if (wantsHeuristicNer(this.config, categories)) {
+        matches.push(...detectHeuristicPII(text, categories))
+      }
     }
 
     matches.push(...(await detectPluginPII(text, plugins)))
@@ -286,6 +297,11 @@ export class PIIFilter {
 
       const regexMatches = detectRegexPII(filtered, categories, getCustomPatterns(this.config))
       filtered = applyReplacements(filtered, regexMatches, this.registerMaskedMatch.bind(this))
+
+      if (wantsHeuristicNer(this.config, categories)) {
+        const heuristicMatches = detectHeuristicPII(filtered, categories)
+        filtered = applyReplacements(filtered, heuristicMatches, this.registerMaskedMatch.bind(this))
+      }
     }
 
     const pluginMatches = await detectPluginPII(filtered, plugins)
