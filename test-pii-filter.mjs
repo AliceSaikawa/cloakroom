@@ -868,6 +868,22 @@ async function testJapanesePlaceholderLabels() {
   assert.ok(content.includes('[メールアドレスAA]'), '#5: placeholder counter should continue with AA')
   assert.equal(filter.restoreText(content), emails, '#5: Japanese placeholders should restore original text')
   console.log('#5 Japanese placeholder labels: OK')
+
+  {
+    const collisionFilter = new piiFilter.PIIFilter({
+      ...baseConfig,
+      customCategories: [{ name: 'CONTACT', label: 'メールアドレス', dictionary: ['社内窓口'] }],
+    })
+    const input = '窓口は 社内窓口 または alice@example.com まで。'
+    const filtered = await collisionFilter.filterRequestBody({ messages: [{ role: 'user', content: input }] })
+    const content = filtered.messages[0].content
+
+    assert.ok(!content.includes('社内窓口') && !content.includes('alice@example.com'))
+    const placeholders = content.match(/\[メールアドレス[A-Z]+\]/g) ?? []
+    assert.equal(new Set(placeholders).size, 2, 'colliding labels must produce distinct placeholders')
+    assert.equal(collisionFilter.restoreText(content), input, 'colliding labels must restore both originals')
+    console.log('#5 placeholder label collision: OK')
+  }
 }
 
 async function testFinancialIdentityRegexCoverage() {

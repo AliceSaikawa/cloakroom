@@ -32,9 +32,12 @@ export class MappingTable {
     const existing = this.originalToPlaceholder.get(original)
     if (existing) return existing
 
-    const counterKey = String(category)
-    const count = (this.counters.get(counterKey) ?? 0) + 1
-    this.counters.set(counterKey, count)
+    // Key the counter by the visible prefix, not the category: two categories
+    // sharing a prefix (e.g. a custom label colliding with a built-in Japanese
+    // label) must still produce distinct placeholders, or restoration would
+    // silently return the wrong original value.
+    const count = (this.counters.get(placeholderPrefix) ?? 0) + 1
+    this.counters.set(placeholderPrefix, count)
 
     const placeholder = `[${placeholderPrefix}${toAlphabeticSequence(count)}]`
     this.originalToPlaceholder.set(original, placeholder)
