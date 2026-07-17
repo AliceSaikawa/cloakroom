@@ -12,16 +12,16 @@ A local HTTP proxy that sits between Claude Code (or any Anthropic API / OpenAI-
 Claude Code / API client
         │  ANTHROPIC_BASE_URL / OPENAI_BASE_URL → http://127.0.0.1:8787
         ▼
-┌───────────────────────────────────────────────┐
-│  Cloakroom proxy (127.0.0.1:8787)              │
-│                                                 │
-│  1. Dictionary exact match  (config.dictionary)│
-│  2. Regex match      (built-in + customPatterns)│
-│  3. Ollama LLM match  (NAME/ORG/SCHOOL, optional)│
-│       ↓                                         │
-│  Placeholder registration → [メールアドレスA] [人名B] │
-│  (per-session MappingTable)                     │
-└───────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│  Cloakroom proxy (127.0.0.1:8787)                   │
+│                                                     │
+│  1. Dictionary exact match (config.dictionary)      │
+│  2. Regex match (built-in + customPatterns)         │
+│  3. Ollama LLM match (NAME/ORG/SCHOOL, optional)    │
+│       ↓                                             │
+│  Placeholder registration → [メールアドレスA]       │
+│  (per-session MappingTable)                         │
+└─────────────────────────────────────────────────────┘
         │ masked request
         ▼
   Anthropic API        (POST /v1/messages)
@@ -29,13 +29,12 @@ Claude Code / API client
   Any other path        (passed through untouched)
         │ response (JSON or SSE)
         ▼
-┌───────────────────────────────────────────────┐
-│  Placeholder restoration                        │
-│  - Non-streaming: recursive walk over the JSON  │
-│  - Streaming: buffers text_delta /               │
-│    choices[].delta so placeholders split across │
-│    chunk boundaries still resolve correctly      │
-└───────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│  Placeholder restoration                            │
+│  - Non-streaming: recursive walk over the JSON      │
+│  - Streaming: buffers text_delta / choices[].delta  │
+│    so split placeholders still resolve correctly    │
+└─────────────────────────────────────────────────────┘
         │ restored response
         ▼
 Claude Code / API client

@@ -6,6 +6,18 @@ import type { FilterPlugin, FilterPluginMatch, PIICategory, PIIMatch } from './t
 
 const pluginCache = new Map<string, Promise<readonly FilterPlugin[]>>()
 
+// Plugin detect() receives unmasked text, so an error message may embed raw
+// PII. Log only the first line, hard-capped, to keep it out of stderr.
+const MAX_ERROR_MESSAGE_LENGTH = 160
+
+function describeError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  const firstLine = message.split('\n', 1)[0] ?? ''
+  return firstLine.length > MAX_ERROR_MESSAGE_LENGTH
+    ? `${firstLine.slice(0, MAX_ERROR_MESSAGE_LENGTH)}…`
+    : firstLine
+}
+
 function resolvePluginPath(input: string): string | undefined {
   const expanded = input === '~' ? homedir() : input.replace(/^~\//, `${homedir()}/`)
   if (!isAbsolute(expanded)) return undefined
@@ -41,8 +53,7 @@ export async function loadFilterPlugins(paths: readonly string[] = []): Promise<
       let pending = pluginCache.get(path)
       if (!pending) {
         pending = loadPlugin(path).catch((error: unknown) => {
-          const message = error instanceof Error ? error.message : String(error)
-          process.stderr.write(`Failed to load PII plugin ${path}: ${message}\n`)
+          process.stderr.write(`Failed to load PII plugin ${path}: ${describeError(error)}\n`)
           return []
         })
         pluginCache.set(path, pending)
@@ -88,8 +99,7 @@ export async function detectPluginPII(
         })
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      process.stderr.write(`PII plugin ${plugin.name} failed: ${message}\n`)
+      process.stderr.write(`PII plugin ${plugin.name} failed: ${describeError(error)}\n`)
     }
   }
 
