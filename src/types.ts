@@ -71,6 +71,8 @@ export type CustomPatternEntry = {
   readonly name: string
   readonly pattern: string
   readonly category?: PIICategory
+  readonly flags?: string
+  readonly captureGroup?: number
 }
 
 export type CustomCategoryConfig = {
@@ -95,7 +97,7 @@ export type FilterPlugin = {
   detect(text: string): readonly FilterPluginMatch[] | Promise<readonly FilterPluginMatch[]>
 }
 
-export type PIIMode = 'pseudonymize' | 'anonymize'
+export type PIIMode = 'pseudonymize' | 'anonymize' | 'fake'
 
 export type AuditLogDestination = 'stderr' | 'file'
 

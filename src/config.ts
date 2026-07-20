@@ -55,7 +55,10 @@ export function loadPIIConfig(): PIIFilterConfig {
 
     loadedConfig = {
       enabled: parsed.enabled ?? DEFAULT_CONFIG.enabled,
-      mode: parsed.mode === 'anonymize' ? 'anonymize' : DEFAULT_CONFIG.mode,
+      mode:
+        parsed.mode === 'anonymize' || parsed.mode === 'fake'
+          ? parsed.mode
+          : DEFAULT_CONFIG.mode,
       maxRequestBodyBytes: normalizeMaxRequestBodyBytes(parsed.maxRequestBodyBytes),
       categories: parsed.categories ?? DEFAULT_CONFIG.categories,
       ollamaEndpoint: normalizeOllamaEndpoint(parsed.ollamaEndpoint, allowRemoteOllama),

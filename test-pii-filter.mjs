@@ -1204,6 +1204,117 @@ async function testHeuristicNerDetection() {
   console.log('Heuristic NER Detection PASSED')
 }
 
+async function testMaskingQualityAndSecrets() {
+  console.log('\n=== Masking Quality And Secrets ===')
+
+  const { piiFilter, regexFilter } = await loadActualModules()
+  const baseConfig = {
+    enabled: true,
+    mode: 'pseudonymize',
+    categories: ['EMAIL', 'PHONE', 'NAME', 'API_KEY'],
+    ollamaEndpoint: 'http://localhost:11434',
+    allowRemoteOllama: false,
+    ollamaModel: 'gemma3:4b',
+    ollamaEnabled: false,
+    heuristicNerEnabled: false,
+    customPatterns: [],
+    customCategories: [],
+    plugins: [],
+    dictionary: [],
+    allowlist: [],
+    auditLog: { enabled: false, destination: 'stderr', reviewThreshold: 0.8 },
+  }
+
+  {
+    const captureMatches = regexFilter.detectRegexPII(
+      'ababa',
+      ['CAPTURE'],
+      [{ name: 'CAPTURE', pattern: '(aba)(ba)', captureGroup: 2 }],
+    )
+    assert.equal(captureMatches[0]?.start, 3, '#70: capture groups should use their exact indices')
+    assert.equal(captureMatches[0]?.text, 'ba', '#70: capture group value should be masked')
+
+    const caseInsensitive = regexFilter.detectRegexPII(
+      'secret-value',
+      ['CUSTOM_SECRET'],
+      [{ name: 'CUSTOM_SECRET', pattern: 'SECRET-VALUE', flags: 'i' }],
+    )
+    assert.equal(caseInsensitive.length, 1, '#70: custom pattern flags should support case-insensitive matching')
+
+    const overlap = regexFilter.selectNonOverlappingMatches([
+      { text: 'abcdef', category: 'LOW', start: 0, end: 6, confidence: 0.2 },
+      { text: 'abc', category: 'HIGH', start: 0, end: 3, confidence: 1 },
+    ])
+    assert.equal(overlap[0]?.category, 'HIGH', '#70: higher-confidence overlap should win')
+    console.log('#70 regex match precision: OK')
+  }
+
+  {
+    const filter = new piiFilter.PIIFilter(baseConfig)
+    const filtered = await filter.filterRequestBody({
+      messages: [{ role: 'user', content: TEST_PII.email }],
+    })
+    const placeholder = filtered.messages[0].content
+    assert.equal(filter.restoreText(`［メールアドレス A］`), TEST_PII.email)
+    assert.equal(filter.restoreText(`「メールアドレスA」`), TEST_PII.email)
+    assert.equal(filter.restoreText(`value: ${placeholder}`), `value: ${TEST_PII.email}`)
+
+    const restored = filter.restoreResponseBody({
+      content: [
+        { type: 'thinking', thinking: placeholder },
+        { type: 'redacted_thinking', data: placeholder },
+        { type: 'text', text: placeholder },
+      ],
+    })
+    assert.equal(restored.content[0].thinking, placeholder, '#72: thinking blocks must remain masked')
+    assert.equal(restored.content[1].data, placeholder, '#72: redacted thinking must remain masked')
+    assert.equal(restored.content[2].text, TEST_PII.email, '#72: normal text should still restore')
+    console.log('#71/#72 resilient restoration and thinking safety: OK')
+  }
+
+  {
+    const filter = new piiFilter.PIIFilter({ ...baseConfig, mode: 'fake' })
+    const input = `メール ${TEST_PII.email}、電話 ${TEST_PII.phone}`
+    const filtered = await filter.filterRequestBody({ messages: [{ role: 'user', content: input }] })
+    const content = filtered.messages[0].content
+    assert.ok(content.includes('person1@example.com'), '#73: fake mode should use a reserved email domain')
+    assert.ok(content.includes('090-0000-0001'), '#73: fake mode should use a plausible phone number')
+    assert.equal(filter.restoreText(content), input, '#73: fake values should remain reversible')
+
+    const repeated = await filter.filterRequestBody({
+      messages: [{ role: 'user', content: 'person1@example.com' }],
+    })
+    assert.equal(repeated.messages[0].content, 'person1@example.com', '#73: issued fake values must not be remasked')
+    console.log('#73 reversible fake data mode: OK')
+  }
+
+  {
+    const awsAccessKey = 'ASIA1234567890ABCDEF'
+    const awsSecret = 'abcdefghijklmnopqrstuvwxyz0123456789ABCD'
+    const githubToken = `ghs_${'a'.repeat(36)}`
+    const stripeKey = `sk_live_${'b'.repeat(24)}`
+    const googleKey = `AIza${'c'.repeat(35)}`
+    const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturepart'
+    const pem = '-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----'
+    const entropySecret = 'aB3dE5fG7hI9jK1LmN0pQ2rS4tU6vW8xY'
+    const input = [
+      awsAccessKey,
+      `AWS_SECRET_ACCESS_KEY=${awsSecret}`,
+      githubToken,
+      stripeKey,
+      googleKey,
+      jwt,
+      pem,
+      `token=${entropySecret}`,
+    ].join('\n')
+    const matches = regexFilter.detectRegexPII(input, ['API_KEY'])
+    for (const secret of [awsAccessKey, awsSecret, githubToken, stripeKey, googleKey, jwt, pem, entropySecret]) {
+      assert.ok(matches.some((match) => match.text === secret), `#74: should detect ${secret.slice(0, 12)}`)
+    }
+    console.log('#74 expanded secret detection: OK')
+  }
+}
+
 async function testFinancialIdentityRegexCoverage() {
   console.log('\n=== Financial and Identity Regex Coverage ===')
 
@@ -1527,6 +1638,7 @@ try {
   await testProxySafetyRegressions()
   await testJapanesePlaceholderLabels()
   await testHeuristicNerDetection()
+  await testMaskingQualityAndSecrets()
   await testFinancialIdentityRegexCoverage()
   await testSensitiveRecordRegexCoverage()
 

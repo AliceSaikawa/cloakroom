@@ -1,6 +1,7 @@
 import { loadPIIConfig } from './config.js'
 import { getActiveCategories, isPassthroughEnabled } from './controlState.js'
 import { writeAuditLog } from './auditLog.js'
+import { createFakeValue } from './fakeData.js'
 import { detectHeuristicPII } from './heuristicNer.js'
 import { MappingTable } from './mappingTable.js'
 import { detectOllamaPII } from './ollamaFilter.js'
@@ -159,6 +160,12 @@ export class PIIFilter {
   private registerMaskedMatch(match: PIIMatch): string {
     if (this.allowlist.has(match.text)) return match.text
 
+    // Fake values can match the normal regexes on later turns. Preserve a
+    // previously issued value instead of assigning it a second replacement.
+    if (this.config.mode === 'fake' && this.mappingTable.resolve(match.text)) {
+      return match.text
+    }
+
     const isReversible = this.config.mode !== 'anonymize'
     const customCategory = this.config.customCategories.find((item) => item.name === match.category)
     const placeholder = this.mappingTable.register(
@@ -169,6 +176,9 @@ export class PIIFilter {
         CATEGORY_LABELS[match.category as keyof typeof CATEGORY_LABELS] ??
         String(match.category),
       isReversible,
+      this.config.mode === 'fake'
+        ? (count) => createFakeValue(match.category, count)
+        : undefined,
     )
 
     writeAuditLog(this.config.auditLog, {
@@ -255,6 +265,9 @@ export class PIIFilter {
         }
       } else if (out['type'] === 'tool_use' && 'input' in out) {
         out['input'] = await this.filterInputValue(out['input'], useOllama)
+      } else if (out['type'] === 'thinking' || out['type'] === 'redacted_thinking') {
+        // These blocks can be signed by the provider. Keep placeholders as-is
+        // so a client may safely send the block back without breaking a signature.
       }
 
       filteredBlocks.push(out)
@@ -339,8 +352,14 @@ export class PIIFilter {
     }
 
     if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>
+      if (record['type'] === 'thinking' || record['type'] === 'redacted_thinking') {
+        // Do not reintroduce PII into provider-signed reasoning blocks.
+        return { ...record }
+      }
+
       const output: Record<string, unknown> = {}
-      for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      for (const [key, item] of Object.entries(record)) {
         output[key] = this.restoreRecursive(item)
       }
       return output
