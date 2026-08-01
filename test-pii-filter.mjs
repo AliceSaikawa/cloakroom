@@ -1425,6 +1425,44 @@ async function testSensitiveRecordRegexCoverage() {
   }
 }
 
+async function testUsernameAndCredentials() {
+  console.log('\n=== Username and Credentials ===')
+
+  const { regexFilter } = await loadActualModules()
+
+  function detectAs(text, category) {
+    return regexFilter.detectRegexPII(text, [category])
+  }
+
+  {
+    const matches = detectAs('cc @alice-dev in the PR', 'USERNAME')
+    assert.ok(matches.some((m) => m.text === 'alice-dev'), 'USERNAME: @handle should be detected')
+    const noMatch = detectAs('user@example.com', 'USERNAME')
+    assert.equal(noMatch.length, 0, 'USERNAME: email address should not be matched as USERNAME')
+    console.log('USERNAME @handle: OK')
+  }
+
+  {
+    const matches = detectAs('admin:s3cr3tPass', 'CREDENTIAL_PAIR')
+    assert.ok(matches.length > 0, 'CREDENTIAL_PAIR: user:pass should be detected')
+    const urlMatch = detectAs('https://user:pass@example.com', 'CREDENTIAL_PAIR')
+    assert.equal(urlMatch.length, 0, 'CREDENTIAL_PAIR: URL credentials should not match (covered by URL_USER)')
+    console.log('CREDENTIAL_PAIR: OK')
+  }
+
+  {
+    const eq = detectAs('password=MyS3cret!', 'PASSWORD')
+    assert.ok(eq.some((m) => m.text === 'MyS3cret!'), 'PASSWORD: password= form should be detected')
+    const colon = detectAs('passwd: hunter2', 'PASSWORD')
+    assert.ok(colon.some((m) => m.text === 'hunter2'), 'PASSWORD: passwd: form should be detected')
+    const caseInsensitive = detectAs('PWD=abc123xyz', 'PASSWORD')
+    assert.ok(caseInsensitive.some((m) => m.text === 'abc123xyz'), 'PASSWORD: PWD= (uppercase) should be detected')
+    console.log('PASSWORD: OK')
+  }
+
+  console.log('Username and Credentials PASSED')
+}
+
 // ============================================================
 // Scenario 2: Filter OFF
 // ============================================================
@@ -1641,6 +1679,7 @@ try {
   await testMaskingQualityAndSecrets()
   await testFinancialIdentityRegexCoverage()
   await testSensitiveRecordRegexCoverage()
+  await testUsernameAndCredentials()
 
   if (runProxy) {
     await testActualProxy()

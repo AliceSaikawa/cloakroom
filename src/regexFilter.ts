@@ -314,6 +314,20 @@ const PATTERNS: readonly PatternDef[] = [
     pattern: /(?:医師免許証番号|医師免許番号)[:：]?\s*(\d{6})\b/g,
     captureGroup: 1,
   },
+  {
+    category: 'USERNAME',
+    pattern: /(?<!\w)@([A-Za-z0-9_-]{3,30})\b/g,
+    captureGroup: 1,
+  },
+  {
+    category: 'CREDENTIAL_PAIR',
+    pattern: /(?<!\w:\/\/)\b([A-Za-z0-9._-]{2,64}):([A-Za-z0-9!@#$%^&*_+=-]{4,128})(?=\s|$)/g,
+  },
+  {
+    category: 'PASSWORD',
+    pattern: /(?:password|passwd|pwd)\s*[:=]\s*(\S{4,128})/gi,
+    captureGroup: 1,
+  },
 ]
 
 export function detectDictionaryPII(
