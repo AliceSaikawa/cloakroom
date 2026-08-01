@@ -4,7 +4,7 @@ import { writeAuditLog } from './auditLog.js'
 import { incDetectionsByCategory, incRestoredPlaceholders } from './stats.js'
 import { createFakeValue } from './fakeData.js'
 import { detectHeuristicPII } from './heuristicNer.js'
-import { MappingTable } from './mappingTable.js'
+import { MappingTable, toAlphabeticSequence } from './mappingTable.js'
 import { detectOllamaPII } from './ollamaFilter.js'
 import { OpenAIStreamRestorer } from './openaiStreamRestorer.js'
 import { detectPluginPII, loadFilterPlugins } from './pluginLoader.js'
@@ -17,12 +17,51 @@ import {
 import { StreamRestorer } from './streamRestorer.js'
 import {
   CATEGORY_LABELS,
+  type CategoryOption,
   type CustomPatternEntry,
   type DictionaryEntry,
+  type EmailPreserveLevel,
   type PIICategory,
   type PIIFilterConfig,
   type PIIMatch,
 } from './types.js'
+
+function extractContext(text: string, category: PIICategory, option: CategoryOption): string | undefined {
+  if (category === 'EMAIL') {
+    const emailOption = option as { preserve: EmailPreserveLevel }
+    const atIndex = text.indexOf('@')
+    if (atIndex === -1) return undefined
+    const domain = text.slice(atIndex + 1)
+    if (emailOption.preserve === 'domain') return `@${domain}`
+    if (emailOption.preserve === 'tld') {
+      const parts = domain.split('.')
+      if (parts.length >= 3) {
+        const secondToLast = parts[parts.length - 2]
+        if (secondToLast && secondToLast.length <= 3) {
+          return `@.${parts.slice(-2).join('.')}`
+        }
+      }
+      return `@.${parts[parts.length - 1]}`
+    }
+  }
+  if (category === 'ADDRESS') {
+    const addrOption = option as { preserve: 'prefecture' | 'none' }
+    if (addrOption.preserve === 'prefecture') {
+      const m = text.match(/^(北海道|東京都|大阪府|京都府|.{2,3}[都道府県])/)
+      if (m) return `(${m[1]})`
+    }
+  }
+  if (category === 'DATE_TIME') {
+    const dateOption = option as { preserve: 'decade' | 'year' | 'none' }
+    const yearMatch = text.match(/(\d{4})/)
+    if (yearMatch) {
+      const year = Number.parseInt(yearMatch[1], 10)
+      if (dateOption.preserve === 'decade') return `(${Math.floor(year / 10) * 10}年代)`
+      if (dateOption.preserve === 'year') return `(${year}年)`
+    }
+  }
+  return undefined
+}
 
 export class BlockedByPolicyError extends Error {
   constructor(readonly categories: readonly PIICategory[]) {
@@ -212,17 +251,28 @@ export class PIIFilter {
 
     const isReversible = this.config.mode !== 'anonymize'
     const customCategory = this.config.customCategories.find((item) => item.name === match.category)
+    const baseLabel =
+      customCategory?.placeholder ??
+      customCategory?.label ??
+      CATEGORY_LABELS[match.category as keyof typeof CATEGORY_LABELS] ??
+      String(match.category)
+
+    const categoryOption = this.config.categoryOptions?.[match.category]
+    const context = categoryOption ? extractContext(match.text, match.category, categoryOption) : undefined
+
+    let createReplacement: ((count: number) => string) | undefined
+    if (this.config.mode === 'fake') {
+      createReplacement = (count) => createFakeValue(match.category, count)
+    } else if (context !== undefined) {
+      createReplacement = (count) => `[${baseLabel}${toAlphabeticSequence(count)}${context}]`
+    }
+
     const placeholder = this.mappingTable.register(
       match.text,
       match.category,
-      customCategory?.placeholder ??
-        customCategory?.label ??
-        CATEGORY_LABELS[match.category as keyof typeof CATEGORY_LABELS] ??
-        String(match.category),
+      baseLabel,
       isReversible,
-      this.config.mode === 'fake'
-        ? (count) => createFakeValue(match.category, count)
-        : undefined,
+      createReplacement,
     )
 
     incDetectionsByCategory(match.category)

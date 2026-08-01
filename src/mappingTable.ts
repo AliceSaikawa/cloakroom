@@ -4,7 +4,7 @@ function escapeRegExp(input: string): string {
   return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-function toAlphabeticSequence(count: number): string {
+export function toAlphabeticSequence(count: number): string {
   let value = count
   let result = ''
 

@@ -109,6 +109,12 @@ export type PIIMode = 'pseudonymize' | 'anonymize' | 'fake'
 
 export type CategoryAction = 'mask' | 'block' | 'warn'
 
+export type EmailPreserveLevel = 'none' | 'domain' | 'tld'
+export type CategoryOption =
+  | { readonly preserve: EmailPreserveLevel }
+  | { readonly preserve: 'prefecture' | 'none' }
+  | { readonly preserve: 'decade' | 'year' | 'none' }
+
 export type AuditLogDestination = 'stderr' | 'file'
 
 export type AuditLogConfig = {
@@ -135,6 +141,7 @@ export type PIIFilterConfig = {
   readonly allowlist: readonly string[]
   readonly auditLog: AuditLogConfig
   readonly categoryActions: Partial<Record<PIICategory, CategoryAction>>
+  readonly categoryOptions: Partial<Record<PIICategory, CategoryOption>>
 }
 
 export const DEFAULT_CONFIG: PIIFilterConfig = {
@@ -179,4 +186,5 @@ export const DEFAULT_CONFIG: PIIFilterConfig = {
     reviewThreshold: 0.8,
   },
   categoryActions: {},
+  categoryOptions: {},
 }

@@ -1838,6 +1838,114 @@ async function testCategoryActions() {
   }
 }
 
+async function testContextPreservingPlaceholders() {
+  console.log('\n=== Context-Preserving Placeholders Tests (#84) ===')
+
+  const { piiFilter } = await loadActualModules()
+
+  const baseConfig = {
+    enabled: true,
+    mode: 'pseudonymize',
+    categories: ['EMAIL', 'ADDRESS', 'DATE_TIME'],
+    ollamaEndpoint: 'http://localhost:11434',
+    allowRemoteOllama: false,
+    ollamaModel: 'gemma3:4b',
+    ollamaEnabled: false,
+    heuristicNerEnabled: false,
+    customPatterns: [],
+    customCategories: [],
+    dictionary: [],
+    allowlist: [],
+    auditLog: { enabled: false, destination: 'stderr', reviewThreshold: 0.8 },
+    categoryActions: {},
+    categoryOptions: {},
+  }
+
+  // Test 1: EMAIL + preserve: 'domain' — domain appears in placeholder
+  {
+    const filter = new piiFilter.PIIFilter({
+      ...baseConfig,
+      categoryOptions: { EMAIL: { preserve: 'domain' } },
+    })
+    const email = 'user@example.co.jp'
+    const body = { messages: [{ role: 'user', content: `メール: ${email}` }] }
+    const result = await filter.filterRequestBody(body)
+    const content = result.messages[0].content
+    assert(!content.includes(email), 'original email should be masked')
+    assert(content.includes('@example.co.jp'), 'domain should appear in placeholder')
+    assert(content.includes('[メールアドレス'), 'placeholder should start with label')
+    console.log('  PASS: EMAIL domain preserve includes domain in placeholder:', content)
+
+    // Verify restoration
+    const restored = filter.restoreText(content)
+    assert(restored.includes(email), `restoreText should recover original email; got: ${restored}`)
+    console.log('  PASS: EMAIL domain preserve restores to original email')
+  }
+
+  // Test 2: EMAIL + preserve: 'tld' — TLD appears in placeholder
+  {
+    const filter = new piiFilter.PIIFilter({
+      ...baseConfig,
+      categoryOptions: { EMAIL: { preserve: 'tld' } },
+    })
+    const email = 'user@example.co.jp'
+    const body = { messages: [{ role: 'user', content: `メール: ${email}` }] }
+    const result = await filter.filterRequestBody(body)
+    const content = result.messages[0].content
+    assert(!content.includes(email), 'original email should be masked')
+    assert(content.includes('@.co.jp'), 'TLD should appear in placeholder')
+    assert(!content.includes('@example.co.jp'), 'full domain should not appear in TLD mode')
+    console.log('  PASS: EMAIL tld preserve includes TLD in placeholder:', content)
+
+    // Verify restoration
+    const restored = filter.restoreText(content)
+    assert(restored.includes(email), `restoreText should recover original email; got: ${restored}`)
+    console.log('  PASS: EMAIL tld preserve restores to original email')
+  }
+
+  // Test 3: no categoryOptions (default) — standard placeholder format
+  {
+    const filter = new piiFilter.PIIFilter({ ...baseConfig })
+    const email = 'user@example.co.jp'
+    const body = { messages: [{ role: 'user', content: `メール: ${email}` }] }
+    const result = await filter.filterRequestBody(body)
+    const content = result.messages[0].content
+    assert(!content.includes(email), 'original email should be masked')
+    assert(!content.includes('@example.co.jp'), 'domain should not appear without categoryOptions')
+    assert(content.match(/\[メールアドレス[A-Z]+\]/), 'standard placeholder format expected')
+    console.log('  PASS: default mode produces standard placeholder:', content)
+  }
+
+  // Test 4: multiple distinct emails with domain preserve — each gets unique letter
+  {
+    const filter = new piiFilter.PIIFilter({
+      ...baseConfig,
+      categoryOptions: { EMAIL: { preserve: 'domain' } },
+    })
+    const body = {
+      messages: [{
+        role: 'user',
+        content: 'alice@example.com and bob@example.com',
+      }],
+    }
+    const result = await filter.filterRequestBody(body)
+    const content = result.messages[0].content
+    assert(!content.includes('alice@example.com'), 'alice email should be masked')
+    assert(!content.includes('bob@example.com'), 'bob email should be masked')
+    // Both placeholders contain domain
+    const matches = content.match(/\[メールアドレス[A-Z]+@example\.com\]/g)
+    assert(matches && matches.length === 2, `two domain-preserving placeholders expected; got: ${content}`)
+    assert(matches[0] !== matches[1], 'two distinct emails should produce distinct placeholders')
+    console.log('  PASS: multiple emails with domain preserve get distinct placeholders:', content)
+
+    // Verify both restore
+    const restored = filter.restoreText(content)
+    assert(restored.includes('alice@example.com') && restored.includes('bob@example.com'),
+      `restoreText should recover both emails; got: ${restored}`)
+    console.log('  PASS: multiple emails with domain preserve restore correctly')
+  }
+}
+
 // ============================================================
 // Run
 // ============================================================
@@ -1862,6 +1970,7 @@ try {
   await testContextEnhancer()
   await testStatsEndpoints()
   await testCategoryActions()
+  await testContextPreservingPlaceholders()
 
   if (runProxy) {
     await testActualProxy()

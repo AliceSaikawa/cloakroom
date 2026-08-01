@@ -1,13 +1,27 @@
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { DEFAULT_CONFIG, type CategoryAction, type PIIFilterConfig } from './types.js'
+import { DEFAULT_CONFIG, type CategoryAction, type CategoryOption, type PIIFilterConfig } from './types.js'
 
 const CONFIG_PATH = join(homedir(), '.claude', 'pii-filter.json')
 
 let loadedConfig: PIIFilterConfig | null = null
 
 const VALID_CATEGORY_ACTIONS = new Set<string>(['mask', 'block', 'warn'])
+
+function parseCategoryOptions(raw: unknown): Partial<Record<string, CategoryOption>> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const result: Partial<Record<string, CategoryOption>> = {}
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const obj = value as Record<string, unknown>
+      if (typeof obj['preserve'] === 'string') {
+        result[key] = { preserve: obj['preserve'] } as CategoryOption
+      }
+    }
+  }
+  return result
+}
 
 function parseCategoryActions(raw: unknown): Partial<Record<string, CategoryAction>> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
@@ -87,6 +101,7 @@ export function loadPIIConfig(): PIIFilterConfig {
       dictionary: parsed.dictionary ?? DEFAULT_CONFIG.dictionary,
       allowlist: parsed.allowlist ?? DEFAULT_CONFIG.allowlist,
       categoryActions: parseCategoryActions(parsed.categoryActions),
+      categoryOptions: parseCategoryOptions(parsed.categoryOptions),
       auditLog: {
         enabled: Boolean(auditLog.enabled),
         destination: auditLog.destination === 'file' ? 'file' : 'stderr',
