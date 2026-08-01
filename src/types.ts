@@ -79,6 +79,8 @@ export type CustomPatternEntry = {
   readonly category?: PIICategory
   readonly flags?: string
   readonly captureGroup?: number
+  readonly contextWords?: readonly string[]
+  readonly suppressWords?: readonly string[]
 }
 
 export type CustomCategoryConfig = {

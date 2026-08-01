@@ -1,10 +1,50 @@
 import type { CustomPatternEntry, DictionaryEntry, PIICategory, PIIMatch } from './types.js'
 
+type ContextEnhancer = {
+  readonly boostWords: readonly string[]
+  readonly suppressWords: readonly string[]
+  readonly boostAmount: number
+  readonly suppressAmount: number
+  readonly windowChars: number
+}
+
 type PatternDef = {
   readonly category: PIICategory
   readonly pattern: RegExp
   readonly validate?: (match: string) => boolean
   readonly captureGroup?: number
+  readonly contextEnhancer?: ContextEnhancer
+  readonly baseConfidence?: number
+}
+
+function applyContextEnhancer(
+  text: string,
+  start: number,
+  end: number,
+  enhancer: ContextEnhancer,
+  confidence: number,
+): number {
+  const windowStart = Math.max(0, start - enhancer.windowChars)
+  const windowEnd = Math.min(text.length, end + enhancer.windowChars)
+  const context = text.slice(windowStart, start) + text.slice(end, windowEnd)
+
+  let adjusted = confidence
+
+  for (const word of enhancer.boostWords) {
+    if (context.includes(word)) {
+      adjusted = Math.min(1, adjusted + enhancer.boostAmount)
+      break
+    }
+  }
+
+  for (const word of enhancer.suppressWords) {
+    if (context.includes(word)) {
+      adjusted = Math.max(0, adjusted - enhancer.suppressAmount)
+      break
+    }
+  }
+
+  return adjusted
 }
 
 export function selectNonOverlappingMatches(matches: readonly PIIMatch[]): readonly PIIMatch[] {
@@ -192,21 +232,51 @@ const PATTERNS: readonly PatternDef[] = [
     category: 'MY_NUMBER',
     pattern: /\b\d{4}[-\s]\d{4}[-\s]\d{4}\b/g,
     validate: myNumberCheck,
+    contextEnhancer: {
+      boostWords: ['マイナンバー', '個人番号', '番号通知'],
+      suppressWords: ['サンプル', '例', 'test'],
+      boostAmount: 0.2,
+      suppressAmount: 0.3,
+      windowChars: 30,
+    },
   },
   {
     category: 'MY_NUMBER',
     pattern: /(?:マイナンバー|個人番号)[:：]?\s*(\d{12}|\d{4}[-\s]\d{4}[-\s]\d{4})\b/g,
     captureGroup: 1,
     validate: myNumberCheck,
+    contextEnhancer: {
+      boostWords: ['マイナンバー', '個人番号', '番号通知'],
+      suppressWords: ['サンプル', '例', 'test'],
+      boostAmount: 0.2,
+      suppressAmount: 0.3,
+      windowChars: 30,
+    },
   },
   {
     category: 'PHONE',
     pattern: /(?:\+81[-\s]?|0)\d{1,4}[-\s]?\d{1,4}[-\s]?\d{3,4}\b/g,
     validate: (match: string) => match.replace(/[-\s]/g, '').length >= 10,
+    baseConfidence: 0.8,
+    contextEnhancer: {
+      boostWords: ['電話', 'TEL', 'tel', '連絡先', 'Phone', 'phone'],
+      suppressWords: ['サンプル', '例', 'test', 'example', 'dummy', 'xxx'],
+      boostAmount: 0.2,
+      suppressAmount: 0.3,
+      windowChars: 30,
+    },
   },
   {
     category: 'PHONE',
     pattern: /\+\d{1,3}[-\s]\d{1,14}(?:[-\s]\d{1,14}){0,4}\b/g,
+    baseConfidence: 0.8,
+    contextEnhancer: {
+      boostWords: ['電話', 'TEL', 'tel', '連絡先', 'Phone', 'phone'],
+      suppressWords: ['サンプル', '例', 'test', 'example', 'dummy', 'xxx'],
+      boostAmount: 0.2,
+      suppressAmount: 0.3,
+      windowChars: 30,
+    },
   },
   {
     category: 'ADDRESS',
@@ -264,10 +334,24 @@ const PATTERNS: readonly PatternDef[] = [
     category: 'BANK_ACCOUNT',
     pattern:
       /(?:金融機関コード|銀行コード)[:：]?\s*\d{4}[、,\s]+(?:支店コード|支店番号)[:：]?\s*\d{3}[、,\s]+(?:口座番号)[:：]?\s*\d{7}\b/g,
+    contextEnhancer: {
+      boostWords: ['口座', '振込', '銀行', '口座番号'],
+      suppressWords: ['サンプル', '例', 'test'],
+      boostAmount: 0.2,
+      suppressAmount: 0.3,
+      windowChars: 30,
+    },
   },
   {
     category: 'BANK_ACCOUNT',
     pattern: /(?:口座番号)[:：]?\s*(普通|当座)?\s*\d{7}\b/g,
+    contextEnhancer: {
+      boostWords: ['口座', '振込', '銀行', '口座番号'],
+      suppressWords: ['サンプル', '例', 'test'],
+      boostAmount: 0.2,
+      suppressAmount: 0.3,
+      windowChars: 30,
+    },
   },
   {
     category: 'DRIVER_LICENSE',
@@ -397,12 +481,17 @@ export function detectRegexPII(
       const start = groupIndex?.[0] ?? m.index
       const end = groupIndex?.[1] ?? start + matchText.length
 
+      const baseConfidence = def.baseConfidence ?? 1
+      const confidence = def.contextEnhancer
+        ? applyContextEnhancer(text, start, end, def.contextEnhancer, baseConfidence)
+        : baseConfidence
+
       matches.push({
         text: matchText,
         category: def.category,
         start,
         end,
-        confidence: 1,
+        confidence,
       })
     }
   }
@@ -427,12 +516,31 @@ export function detectRegexPII(
         const end = groupIndex?.[1] ?? start + matchText.length
         if (!matchText) continue
 
+        const hasCustomContext =
+          (custom.contextWords && custom.contextWords.length > 0) ||
+          (custom.suppressWords && custom.suppressWords.length > 0)
+        const customConfidence = hasCustomContext
+          ? applyContextEnhancer(
+              text,
+              start,
+              end,
+              {
+                boostWords: custom.contextWords ?? [],
+                suppressWords: custom.suppressWords ?? [],
+                boostAmount: 0.2,
+                suppressAmount: 0.2,
+                windowChars: 30,
+              },
+              1,
+            )
+          : 1
+
         matches.push({
           text: matchText,
           category,
           start,
           end,
-          confidence: 1,
+          confidence: customConfidence,
         })
       }
     } catch {

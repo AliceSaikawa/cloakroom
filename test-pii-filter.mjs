@@ -1523,6 +1523,76 @@ async function testStatsEndpoints() {
   console.log('#79 Stats module (in-memory): OK')
 }
 
+async function testContextEnhancer() {
+  console.log('\n=== Context Enhancer (confidence adjustment) ===')
+
+  const { regexFilter } = await loadActualModules()
+
+  // A valid Japanese phone number that passes validate()
+  const phone = '090-1234-5678'
+
+  // Baseline: no context words present
+  const baseline = regexFilter.detectRegexPII(`番号: ${phone}`, ['PHONE'])
+  assert.ok(baseline.length > 0, 'baseline: phone should be detected')
+  const baselineConf = baseline[0].confidence
+
+  // Boost: "電話" in prefix context → confidence should increase
+  const boosted = regexFilter.detectRegexPII(`電話: ${phone}`, ['PHONE'])
+  assert.ok(boosted.length > 0, 'boost: phone should be detected')
+  assert.ok(
+    boosted[0].confidence > baselineConf,
+    `boost: confidence (${boosted[0].confidence}) should be > baseline (${baselineConf})`,
+  )
+  console.log(`boost OK: baseline=${baselineConf} boosted=${boosted[0].confidence}`)
+
+  // Suppress: "サンプル" in prefix context → confidence should decrease
+  const suppressed = regexFilter.detectRegexPII(`サンプル: ${phone}`, ['PHONE'])
+  assert.ok(suppressed.length > 0, 'suppress: phone should be detected')
+  assert.ok(
+    suppressed[0].confidence < baselineConf,
+    `suppress: confidence (${suppressed[0].confidence}) should be < baseline (${baselineConf})`,
+  )
+  console.log(`suppress OK: baseline=${baselineConf} suppressed=${suppressed[0].confidence}`)
+
+  // Custom pattern with contextWords / suppressWords
+  const customMatches = regexFilter.detectRegexPII(
+    'VIP番号: 12345',
+    ['CUSTOM_VIP'],
+    [
+      {
+        name: 'CUSTOM_VIP',
+        pattern: '\\d{5}',
+        contextWords: ['VIP番号'],
+        suppressWords: ['dummy'],
+      },
+    ],
+  )
+  assert.ok(customMatches.length > 0, 'custom: pattern should match')
+  assert.ok(customMatches[0].confidence > 1 - 0.001, 'custom: VIP番号 context should boost to 1.0')
+  console.log(`custom contextWords OK: confidence=${customMatches[0].confidence}`)
+
+  const customSuppressed = regexFilter.detectRegexPII(
+    'dummy: 12345',
+    ['CUSTOM_VIP'],
+    [
+      {
+        name: 'CUSTOM_VIP',
+        pattern: '\\d{5}',
+        contextWords: ['VIP番号'],
+        suppressWords: ['dummy'],
+      },
+    ],
+  )
+  assert.ok(customSuppressed.length > 0, 'custom suppress: pattern should match')
+  assert.ok(
+    customSuppressed[0].confidence < 1,
+    `custom suppress: confidence (${customSuppressed[0].confidence}) should be < 1`,
+  )
+  console.log(`custom suppressWords OK: confidence=${customSuppressed[0].confidence}`)
+
+  console.log('Context Enhancer PASSED')
+}
+
 // ============================================================
 // Scenario 2: Filter OFF
 // ============================================================
@@ -1740,6 +1810,7 @@ try {
   await testFinancialIdentityRegexCoverage()
   await testSensitiveRecordRegexCoverage()
   await testUsernameAndCredentials()
+  await testContextEnhancer()
   await testStatsEndpoints()
 
   if (runProxy) {
