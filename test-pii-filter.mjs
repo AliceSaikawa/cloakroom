@@ -1593,6 +1593,82 @@ async function testContextEnhancer() {
   console.log('Context Enhancer PASSED')
 }
 
+async function testResponseDetection() {
+  console.log('\n=== Response Detection (#78 Phase 1) ===')
+
+  const { piiFilter, sessionFilterStore } = await loadActualModules()
+
+  const baseConfig = {
+    enabled: true,
+    mode: 'pseudonymize',
+    categories: ['EMAIL', 'PHONE'],
+    ollamaEndpoint: 'http://localhost:11434',
+    allowRemoteOllama: false,
+    ollamaModel: 'gemma3:4b',
+    ollamaEnabled: false,
+    heuristicNerEnabled: false,
+    customPatterns: [],
+    customCategories: [],
+    plugins: [],
+    dictionary: [],
+    allowlist: [],
+    auditLog: { enabled: false, destination: 'stderr', reviewThreshold: 0.8 },
+    categoryActions: {},
+    categoryOptions: {},
+  }
+
+  // Test 1: responseDetection.enabled: true → detects PII in response body
+  {
+    const filter = new piiFilter.PIIFilter({
+      ...baseConfig,
+      responseDetection: { enabled: true, action: 'warn' },
+    })
+    const result = await filter.filterResponseBody(`Contact me at ${TEST_PII.email} or ${TEST_PII.phone}`)
+    assert.ok(Array.isArray(result.detectedCategories), 'detectedCategories should be an array')
+    assert.ok(result.detectedCategories.includes('EMAIL'), '#78: EMAIL should be detected in response')
+    assert.ok(!result.detectedCategories.includes('NAME'), '#78: undetected categories should not appear')
+    console.log('  PASS: responseDetection enabled detects PII in response')
+  }
+
+  // Test 2: responseDetection.enabled: false → returns empty without detection
+  {
+    const filter = new piiFilter.PIIFilter({
+      ...baseConfig,
+      responseDetection: { enabled: false, action: 'warn' },
+    })
+    const result = await filter.filterResponseBody(`Contact me at ${TEST_PII.email}`)
+    assert.deepEqual(result.detectedCategories, [], '#78: disabled responseDetection should return empty')
+    console.log('  PASS: responseDetection disabled returns empty result')
+  }
+
+  // Test 3: providerOverrides disables OpenAI filter via sessionFilterStore.acquire
+  {
+    const store = new sessionFilterStore.SessionFilterStore({
+      ...baseConfig,
+      providerOverrides: { openai: { enabled: false } },
+    })
+    const openaiReq = {
+      url: '/v1/chat/completions',
+      method: 'POST',
+      headers: {},
+      socket: new EventEmitter(),
+    }
+    const anthropicReq = {
+      url: '/v1/messages',
+      method: 'POST',
+      headers: {},
+      socket: new EventEmitter(),
+    }
+    const openaiFilter = store.acquire(openaiReq)
+    const anthropicFilter = store.acquire(anthropicReq)
+    assert.equal(openaiFilter.isEnabled(), false, '#78: providerOverrides should disable OpenAI filter')
+    assert.equal(anthropicFilter.isEnabled(), true, '#78: Anthropic filter should remain enabled')
+    console.log('  PASS: providerOverrides disables OpenAI and keeps Anthropic enabled')
+  }
+
+  console.log('Response Detection (#78 Phase 1) PASSED')
+}
+
 // ============================================================
 // Scenario 2: Filter OFF
 // ============================================================
@@ -1971,6 +2047,7 @@ try {
   await testStatsEndpoints()
   await testCategoryActions()
   await testContextPreservingPlaceholders()
+  await testResponseDetection()
 
   if (runProxy) {
     await testActualProxy()

@@ -1,13 +1,50 @@
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { DEFAULT_CONFIG, type CategoryAction, type CategoryOption, type PIIFilterConfig } from './types.js'
+import { DEFAULT_CONFIG, type CategoryAction, type CategoryOption, type PIIFilterConfig, type ResponseDetectionConfig } from './types.js'
 
 const CONFIG_PATH = join(homedir(), '.claude', 'pii-filter.json')
 
 let loadedConfig: PIIFilterConfig | null = null
 
 const VALID_CATEGORY_ACTIONS = new Set<string>(['mask', 'block', 'warn'])
+
+function parseResponseDetection(raw: unknown): ResponseDetectionConfig {
+  const defaults = DEFAULT_CONFIG.responseDetection!
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return defaults
+  const obj = raw as Record<string, unknown>
+  return {
+    enabled: typeof obj['enabled'] === 'boolean' ? obj['enabled'] : defaults.enabled,
+    action: 'warn',
+  }
+}
+
+function parseProviderOverride(
+  raw: unknown,
+): Partial<Pick<PIIFilterConfig, 'enabled' | 'categories' | 'categoryActions'>> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const obj = raw as Record<string, unknown>
+  const result: Partial<Pick<PIIFilterConfig, 'enabled' | 'categories' | 'categoryActions'>> = {}
+  if (typeof obj['enabled'] === 'boolean') result.enabled = obj['enabled']
+  if (Array.isArray(obj['categories'])) {
+    result.categories = obj['categories'].filter((c): c is string => typeof c === 'string')
+  }
+  if (obj['categoryActions']) result.categoryActions = parseCategoryActions(obj['categoryActions'])
+  return Object.keys(result).length > 0 ? result : undefined
+}
+
+function parseProviderOverrides(
+  raw: unknown,
+): Partial<Record<'anthropic' | 'openai', Partial<Pick<PIIFilterConfig, 'enabled' | 'categories' | 'categoryActions'>>>> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const obj = raw as Record<string, unknown>
+  const result: Partial<Record<'anthropic' | 'openai', Partial<Pick<PIIFilterConfig, 'enabled' | 'categories' | 'categoryActions'>>>> = {}
+  for (const kind of ['anthropic', 'openai'] as const) {
+    const override = parseProviderOverride(obj[kind])
+    if (override) result[kind] = override
+  }
+  return result
+}
 
 function parseCategoryOptions(raw: unknown): Partial<Record<string, CategoryOption>> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
@@ -102,6 +139,8 @@ export function loadPIIConfig(): PIIFilterConfig {
       allowlist: parsed.allowlist ?? DEFAULT_CONFIG.allowlist,
       categoryActions: parseCategoryActions(parsed.categoryActions),
       categoryOptions: parseCategoryOptions(parsed.categoryOptions),
+      responseDetection: parseResponseDetection(parsed.responseDetection),
+      providerOverrides: parseProviderOverrides(parsed.providerOverrides),
       auditLog: {
         enabled: Boolean(auditLog.enabled),
         destination: auditLog.destination === 'file' ? 'file' : 'stderr',

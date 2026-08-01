@@ -217,6 +217,32 @@ export class PIIFilter {
       .sort((left, right) => left.start - right.start)
   }
 
+  async filterResponseBody(responseText: string): Promise<{ detectedCategories: PIICategory[] }> {
+    if (!this.config.responseDetection?.enabled) {
+      return { detectedCategories: [] }
+    }
+
+    const matches = await this.analyzeText(responseText)
+    if (matches.length === 0) {
+      return { detectedCategories: [] }
+    }
+
+    for (const match of matches) {
+      writeAuditLog(this.config.auditLog, {
+        timestamp: new Date().toISOString(),
+        category: match.category,
+        placeholder: match.text,
+        confidence: match.confidence,
+        position: { start: match.start, end: match.end },
+        mode: this.config.mode,
+        reviewRequired: match.confidence < this.config.auditLog.reviewThreshold,
+      })
+    }
+
+    const detectedCategories = [...new Set(matches.map((m) => m.category))]
+    return { detectedCategories }
+  }
+
   reset(): void {
     this.mappingTable.clear()
   }

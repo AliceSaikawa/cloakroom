@@ -124,6 +124,11 @@ export type AuditLogConfig = {
   readonly reviewThreshold: number
 }
 
+export type ResponseDetectionConfig = {
+  readonly enabled: boolean
+  readonly action: 'warn'
+}
+
 export type PIIFilterConfig = {
   readonly enabled: boolean
   readonly mode: PIIMode
@@ -142,6 +147,8 @@ export type PIIFilterConfig = {
   readonly auditLog: AuditLogConfig
   readonly categoryActions: Partial<Record<PIICategory, CategoryAction>>
   readonly categoryOptions: Partial<Record<PIICategory, CategoryOption>>
+  readonly responseDetection?: ResponseDetectionConfig
+  readonly providerOverrides?: Partial<Record<'anthropic' | 'openai', Partial<Pick<PIIFilterConfig, 'enabled' | 'categories' | 'categoryActions'>>>>
 }
 
 export const DEFAULT_CONFIG: PIIFilterConfig = {
@@ -187,4 +194,6 @@ export const DEFAULT_CONFIG: PIIFilterConfig = {
   },
   categoryActions: {},
   categoryOptions: {},
+  responseDetection: { enabled: false, action: 'warn' },
+  providerOverrides: {},
 }

@@ -343,6 +343,11 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
             contentType,
             filter,
           )
+          // Response-side PII detection (warn only, non-blocking)
+          if (filter.isEnabled()) {
+            const responseText = typeof restored === 'string' ? restored : restored.toString('utf8')
+            void filter.filterResponseBody(responseText).catch(() => {})
+          }
           res.end(restored)
           resolve()
         })

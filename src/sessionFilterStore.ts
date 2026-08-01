@@ -2,6 +2,7 @@ import type { IncomingMessage } from 'node:http'
 import type { Socket } from 'node:net'
 import { readHeader } from './httpUtils.js'
 import { PIIFilter } from './piiFilter.js'
+import { resolveProvider } from './provider.js'
 import type { PIIFilterConfig } from './types.js'
 
 const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000
@@ -28,6 +29,13 @@ export class SessionFilterStore {
 
   acquire(req: IncomingMessage): PIIFilter {
     this.pruneExpiredSessions()
+
+    // Apply provider-specific overrides when configured
+    const providerOverride = this.config?.providerOverrides?.[resolveProvider(req).kind]
+    if (providerOverride && this.config) {
+      const mergedConfig: PIIFilterConfig = { ...this.config, ...providerOverride }
+      return new PIIFilter(mergedConfig)
+    }
 
     const explicitSessionId = readHeader(req, SESSION_ID_HEADERS)
     if (explicitSessionId) {
