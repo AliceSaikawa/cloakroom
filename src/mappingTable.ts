@@ -1,4 +1,4 @@
-import type { PIICategory } from './types.js'
+import type { PIICategory, VaultData } from './types.js'
 
 function escapeRegExp(input: string): string {
   return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -88,6 +88,28 @@ export class MappingTable {
     this.originalToPlaceholder.clear()
     this.placeholderToOriginal.clear()
     this.counters.clear()
+  }
+
+  toJSON(): VaultData {
+    return {
+      originalToPlaceholder: Object.fromEntries(this.originalToPlaceholder),
+      placeholderToOriginal: Object.fromEntries(this.placeholderToOriginal),
+      counters: Object.fromEntries(this.counters),
+    }
+  }
+
+  static fromJSON(data: VaultData): MappingTable {
+    const table = new MappingTable()
+    for (const [original, placeholder] of Object.entries(data.originalToPlaceholder)) {
+      table.originalToPlaceholder.set(original, placeholder)
+    }
+    for (const [placeholder, original] of Object.entries(data.placeholderToOriginal)) {
+      table.placeholderToOriginal.set(placeholder, original)
+    }
+    for (const [prefix, count] of Object.entries(data.counters)) {
+      table.counters.set(prefix, Number(count))
+    }
+    return table
   }
 
   private resolveNormalized(value: string): string | undefined {

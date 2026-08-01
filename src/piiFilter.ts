@@ -109,14 +109,19 @@ function getCustomPatterns(config: PIIFilterConfig): readonly CustomPatternEntry
 }
 
 export class PIIFilter {
-  private readonly mappingTable = new MappingTable()
+  private readonly mappingTable: MappingTable
   private config: PIIFilterConfig
   private allowlist: ReadonlySet<string>
   private readonly blockedCategories: Set<PIICategory> = new Set()
 
-  constructor(config = loadPIIConfig()) {
+  constructor(config = loadPIIConfig(), mappingTable?: MappingTable) {
     this.config = config
     this.allowlist = new Set(config.allowlist)
+    this.mappingTable = mappingTable ?? new MappingTable()
+  }
+
+  getMappingTable(): MappingTable {
+    return this.mappingTable
   }
 
   isEnabled(): boolean {
