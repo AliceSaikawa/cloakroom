@@ -107,6 +107,8 @@ export type FilterPlugin = {
 
 export type PIIMode = 'pseudonymize' | 'anonymize' | 'fake'
 
+export type CategoryAction = 'mask' | 'block' | 'warn'
+
 export type AuditLogDestination = 'stderr' | 'file'
 
 export type AuditLogConfig = {
@@ -132,6 +134,7 @@ export type PIIFilterConfig = {
   readonly dictionary: readonly DictionaryEntry[]
   readonly allowlist: readonly string[]
   readonly auditLog: AuditLogConfig
+  readonly categoryActions: Partial<Record<PIICategory, CategoryAction>>
 }
 
 export const DEFAULT_CONFIG: PIIFilterConfig = {
@@ -175,4 +178,5 @@ export const DEFAULT_CONFIG: PIIFilterConfig = {
     destination: 'stderr',
     reviewThreshold: 0.8,
   },
+  categoryActions: {},
 }

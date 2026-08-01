@@ -1,11 +1,24 @@
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { DEFAULT_CONFIG, type PIIFilterConfig } from './types.js'
+import { DEFAULT_CONFIG, type CategoryAction, type PIIFilterConfig } from './types.js'
 
 const CONFIG_PATH = join(homedir(), '.claude', 'pii-filter.json')
 
 let loadedConfig: PIIFilterConfig | null = null
+
+const VALID_CATEGORY_ACTIONS = new Set<string>(['mask', 'block', 'warn'])
+
+function parseCategoryActions(raw: unknown): Partial<Record<string, CategoryAction>> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const result: Partial<Record<string, CategoryAction>> = {}
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === 'string' && VALID_CATEGORY_ACTIONS.has(value)) {
+      result[key] = value as CategoryAction
+    }
+  }
+  return result
+}
 
 function normalizeMaxRequestBodyBytes(value: unknown): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
@@ -73,6 +86,7 @@ export function loadPIIConfig(): PIIFilterConfig {
         : DEFAULT_CONFIG.plugins,
       dictionary: parsed.dictionary ?? DEFAULT_CONFIG.dictionary,
       allowlist: parsed.allowlist ?? DEFAULT_CONFIG.allowlist,
+      categoryActions: parseCategoryActions(parsed.categoryActions),
       auditLog: {
         enabled: Boolean(auditLog.enabled),
         destination: auditLog.destination === 'file' ? 'file' : 'stderr',

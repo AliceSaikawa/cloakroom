@@ -122,6 +122,7 @@ Config file: `~/.claude/pii-filter.json` (created by `cloakroom init`, overwritt
 | `plugins` | `[]` | Absolute paths to local JavaScript modules. Export a plugin with `detect(text)` as `default`, `plugin`, or in `plugins`. For TypeScript on Node 22, use `NODE_OPTIONS=--experimental-strip-types` or compile it to `.mjs` |
 | `dictionary` | `[]` | Known exact-match values ({`text`, `category`}). Evaluated before regex and Ollama |
 | `allowlist` | `[]` | Exact-match strings that are never masked, even if detected |
+| `categoryActions` | `{}` | Per-category action policy. Accepted values are `"mask"` (default: replace with placeholder), `"block"` (reject the request with `446 Request Rejected`), and `"warn"` (skip masking, write to audit log only). Example: `{"CREDIT_CARD": "block", "NAME": "warn"}` |
 
 Environment variables:
 

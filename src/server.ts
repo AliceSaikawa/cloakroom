@@ -11,7 +11,7 @@ import {
 } from './controlState.js'
 import { resolveConfiguredCategory } from './controlCategory.js'
 import { loadPIIConfig, reloadPIIConfig } from './config.js'
-import { PIIFilter } from './piiFilter.js'
+import { BlockedByPolicyError, PIIFilter } from './piiFilter.js'
 import { resetPluginCache } from './pluginLoader.js'
 import { resolveProvider, shouldFilterMessagesPath } from './provider.js'
 import { RequestBodyTooLargeError, readRequestBody } from './requestBody.js'
@@ -276,7 +276,24 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
   // across multiple turns. If the caller does not provide a session ID, we fall back
   // to the active keep-alive socket.
   const filter = sessionFilters.acquire(req)
-  const filteredBody = await filter.filterRequestBody(parsedBody)
+
+  let filteredBody: Record<string, unknown>
+  try {
+    filteredBody = await filter.filterRequestBody(parsedBody)
+  } catch (err) {
+    if (err instanceof BlockedByPolicyError) {
+      writeJson(res, 446, {
+        error: {
+          type: 'request_blocked',
+          message: 'Request contains sensitive data',
+          categories: [...err.categories],
+        },
+      })
+      return
+    }
+    throw err
+  }
+
   if (filter.isEnabled()) incMaskedRequests()
   const outgoingBody = Buffer.from(JSON.stringify(filteredBody), 'utf8')
   const headers = normalizeUpstreamHeaders(req.headers, provider.host, outgoingBody.length)

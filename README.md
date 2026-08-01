@@ -122,6 +122,7 @@ model: cloakroom:利用するモデル名
 | `plugins` | `[]` | ローカルJavaScriptモジュールの絶対パス。`default`、`plugin`、`plugins` のいずれかで `detect(text)` を持つプラグインをexportする。TypeScriptはNode 22で `NODE_OPTIONS=--experimental-strip-types` を付けるか、`.mjs`へコンパイルして使う |
 | `dictionary` | `[]` | 完全一致で検出する既知の値({`text`, `category`})。正規表現・Ollamaより先に評価される |
 | `allowlist` | `[]` | ここに含まれる文字列(完全一致)は検出されてもマスクされない |
+| `categoryActions` | `{}` | カテゴリごとの処理方針。`"mask"`(既定: プレースホルダ置換)、`"block"`(リクエスト拒否、`446 Request Rejected` を返す)、`"warn"`(マスクせず audit log のみ記録)の3値を設定できる。例: `{"CREDIT_CARD": "block", "NAME": "warn"}` |
 
 環境変数:
 

@@ -24,6 +24,13 @@ import {
   type PIIMatch,
 } from './types.js'
 
+export class BlockedByPolicyError extends Error {
+  constructor(readonly categories: readonly PIICategory[]) {
+    super(`Request blocked: ${categories.join(', ')}`)
+    this.name = 'BlockedByPolicyError'
+  }
+}
+
 function getCustomCategoryNames(config: PIIFilterConfig): readonly PIICategory[] {
   return config.customCategories
     .filter((category) => category.enabled !== false)
@@ -66,6 +73,7 @@ export class PIIFilter {
   private readonly mappingTable = new MappingTable()
   private config: PIIFilterConfig
   private allowlist: ReadonlySet<string>
+  private readonly blockedCategories: Set<PIICategory> = new Set()
 
   constructor(config = loadPIIConfig()) {
     this.config = config
@@ -93,6 +101,8 @@ export class PIIFilter {
   async filterRequestBody(requestBody: Record<string, unknown>): Promise<Record<string, unknown>> {
     if (!this.isEnabled()) return requestBody
 
+    this.blockedCategories.clear()
+
     const cloned = structuredClone(requestBody)
 
     if ('system' in cloned) {
@@ -101,6 +111,12 @@ export class PIIFilter {
 
     if (Array.isArray(cloned['messages'])) {
       cloned['messages'] = await this.filterMessages(cloned['messages'] as readonly unknown[])
+    }
+
+    if (this.blockedCategories.size > 0) {
+      const categories = [...this.blockedCategories]
+      this.blockedCategories.clear()
+      throw new BlockedByPolicyError(categories)
     }
 
     return cloned
@@ -168,6 +184,25 @@ export class PIIFilter {
 
   private registerMaskedMatch(match: PIIMatch): string {
     if (this.allowlist.has(match.text)) return match.text
+
+    const action = this.config.categoryActions?.[match.category] ?? 'mask'
+
+    if (action === 'warn') {
+      writeAuditLog(this.config.auditLog, {
+        timestamp: new Date().toISOString(),
+        category: match.category,
+        placeholder: match.text,
+        confidence: match.confidence,
+        position: { start: match.start, end: match.end },
+        mode: this.config.mode,
+        reviewRequired: match.confidence < this.config.auditLog.reviewThreshold,
+      })
+      return match.text
+    }
+
+    if (action === 'block') {
+      this.blockedCategories.add(match.category)
+    }
 
     // Fake values can match the normal regexes on later turns. Preserve a
     // previously issued value instead of assigning it a second replacement.

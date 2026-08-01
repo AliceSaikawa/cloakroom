@@ -1789,6 +1789,55 @@ function httpPost(url, body, headers) {
   })
 }
 
+async function testCategoryActions() {
+  console.log('\n=== Category Action Policy Tests (#77) ===')
+
+  const { piiFilter } = await loadActualModules()
+
+  const baseConfig = {
+    enabled: true,
+    mode: 'pseudonymize',
+    categories: ['EMAIL', 'PHONE', 'NAME'],
+    ollamaEndpoint: 'http://localhost:11434',
+    allowRemoteOllama: false,
+    ollamaModel: 'gemma3:4b',
+    ollamaEnabled: false,
+    heuristicNerEnabled: false,
+    customPatterns: [],
+    customCategories: [],
+    dictionary: [],
+    allowlist: [],
+    auditLog: { enabled: false, destination: 'stderr', reviewThreshold: 0.8 },
+    categoryActions: {},
+  }
+
+  // Test 1: EMAIL block — should throw BlockedByPolicyError
+  {
+    const filter = new piiFilter.PIIFilter({ ...baseConfig, categoryActions: { EMAIL: 'block' } })
+    const body = { messages: [{ role: 'user', content: 'Contact me at blocked@example.com' }] }
+    try {
+      await filter.filterRequestBody(body)
+      assert.fail('Should have thrown BlockedByPolicyError')
+    } catch (err) {
+      assert(err instanceof piiFilter.BlockedByPolicyError, 'Should be BlockedByPolicyError')
+      assert(err.categories.includes('EMAIL'), 'Should include EMAIL category')
+    }
+    console.log('  PASS: block action throws BlockedByPolicyError')
+  }
+
+  // Test 2: EMAIL warn — should keep original text, not mask
+  {
+    const filter = new piiFilter.PIIFilter({ ...baseConfig, categoryActions: { EMAIL: 'warn' } })
+    const email = 'warned@example.com'
+    const body = { messages: [{ role: 'user', content: `Contact me at ${email}` }] }
+    const result = await filter.filterRequestBody(body)
+    const content = result.messages[0].content
+    assert(content.includes(email), 'warn action should not mask email')
+    assert(!content.includes('[メールアドレス'), 'warn action should not create placeholder')
+    console.log('  PASS: warn action keeps original text unmasked')
+  }
+}
+
 // ============================================================
 // Run
 // ============================================================
@@ -1812,6 +1861,7 @@ try {
   await testUsernameAndCredentials()
   await testContextEnhancer()
   await testStatsEndpoints()
+  await testCategoryActions()
 
   if (runProxy) {
     await testActualProxy()
