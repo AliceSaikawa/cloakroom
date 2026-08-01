@@ -20,6 +20,9 @@ export const PII_CATEGORIES = [
   'DATE_TIME',
   'MEDICAL_RECORD',
   'HEALTH_INSURANCE',
+  'USERNAME',
+  'CREDENTIAL_PAIR',
+  'PASSWORD',
 ] as const
 
 export type BuiltInPIICategory = (typeof PII_CATEGORIES)[number]
@@ -49,6 +52,9 @@ export const CATEGORY_LABELS: Record<BuiltInPIICategory, string> = {
   DATE_TIME: '生年月日',
   MEDICAL_RECORD: '医療記録',
   HEALTH_INSURANCE: '健康保険証',
+  USERNAME: 'ユーザー名',
+  CREDENTIAL_PAIR: '認証情報',
+  PASSWORD: 'パスワード',
 }
 
 export type PIIMatch = {
