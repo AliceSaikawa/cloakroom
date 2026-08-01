@@ -111,13 +111,14 @@ Config file: `~/.claude/pii-filter.json` (created by `cloakroom init`, overwritt
 |---|---|---|
 | `enabled` | `true` | Master on/off switch. When `false`, neither masking nor restoration runs |
 | `maxRequestBodyBytes` | `67108864` (64 MiB) | Maximum request-body size. Requests above the limit receive `413 Payload Too Large` and are not sent upstream |
+| `mode` | `"pseudonymize"` | `"pseudonymize"` uses placeholders, `"anonymize"` uses irreversible placeholders, and `"fake"` uses reversible dummy values |
 | `categories` | All 21 built-in categories except `URL_USER` | Enabled PII categories. `URL_USER` (Basic-auth-style userinfo in a URL) is not included by default and must be added explicitly |
 | `ollamaEndpoint` | `"http://localhost:11434"` | Ollama API endpoint. By default, only `localhost`, `127.*`, and `::1` are allowed |
 | `allowRemoteOllama` | `false` | Allows remote Ollama endpoints when set to `true`. Use only with trusted hosts because unmasked proper nouns may be sent there |
 | `ollamaModel` | `"gemma3:4b"` | Ollama model to use |
 | `ollamaEnabled` | `false` | Whether Ollama-backed `NAME`/`ORG`/`SCHOOL` detection runs (optional feature, disabled by default) |
 | `heuristicNerEnabled` | `true` | Whether the built-in heuristic NER (surname dictionary + contextual rules for `NAME`/`ORG`/`SCHOOL`) runs. Zero runtime dependencies; set to `false` to disable it |
-| `customPatterns` | `[]` | Extra regex patterns ({`name`, `pattern`, `category?`}). Uses `category` when provided, otherwise uses `name` as the category |
+| `customPatterns` | `[]` | Extra regex patterns ({`name`, `pattern`, `category?`, `flags?`, `captureGroup?`}). `flags` supports `i`/`s`/`u`; `captureGroup` selects the capture group to replace |
 | `plugins` | `[]` | Absolute paths to local JavaScript modules. Export a plugin with `detect(text)` as `default`, `plugin`, or in `plugins`. For TypeScript on Node 22, use `NODE_OPTIONS=--experimental-strip-types` or compile it to `.mjs` |
 | `dictionary` | `[]` | Known exact-match values ({`text`, `category`}). Evaluated before regex and Ollama |
 | `allowlist` | `[]` | Exact-match strings that are never masked, even if detected |
@@ -181,7 +182,9 @@ Requests to any other path are passed through untouched (defaulting to Anthropic
 
 ## PII categories detected by regex
 
-`EMAIL`, `PHONE` (Japanese and international formats), `ADDRESS` (Japanese addresses), `URL_USER` (credentials embedded in a URL), `API_KEY` (`sk-`, `ghp_`, `gho_`, `github_pat_`, `AKIA`, `xox[bpras]-`, `sk-ant-`, etc.), `CREDIT_CARD` (Luhn-validated), `MY_NUMBER` (Japanese My Number format), `NAME` (only via Git's `Author:`/`Committer:` trailers), `SSN`, `IP_ADDRESS` (IPv4/IPv6), `POSTAL_CODE`. General detection of `NAME` / `ORG` / `SCHOOL` is handled by the heuristic NER stage (enabled by default), with the optional Ollama LLM stage further improving accuracy.
+`EMAIL`, `PHONE` (Japanese and international formats), `ADDRESS` (Japanese addresses), `URL_USER` (credentials embedded in a URL), `API_KEY` (OpenAI, Anthropic, GitHub, Slack, Stripe, Google, and AWS formats; PEM private keys; JWTs; and contextual high-entropy tokens), `CREDIT_CARD` (Luhn-validated), `MY_NUMBER` (Japanese My Number format), `NAME` (only via Git's `Author:`/`Committer:` trailers), `SSN`, `IP_ADDRESS` (IPv4/IPv6), `POSTAL_CODE`. Secret values are never sent to an external service for verification. General detection of `NAME` / `ORG` / `SCHOOL` is handled by the heuristic NER stage (enabled by default), with the optional Ollama LLM stage further improving accuracy.
+
+`fake` mode replaces values with safe dummy data such as `person1@example.com` and can restore the originals within the same proxy session. If a model returns an issued placeholder with full-width brackets, Japanese quotes, or added whitespace, it is still restored. `thinking` and `redacted_thinking` blocks deliberately keep their placeholders so signed reasoning blocks are not altered and PII is not reintroduced.
 
 ## Heuristic NER (built in, no Ollama required)
 

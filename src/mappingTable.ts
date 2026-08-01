@@ -28,6 +28,7 @@ export class MappingTable {
     category: PIICategory,
     placeholderPrefix: string = String(category),
     reversible = true,
+    createReplacement?: (count: number) => string,
   ): string {
     const existing = this.originalToPlaceholder.get(original)
     if (existing) return existing
@@ -39,17 +40,19 @@ export class MappingTable {
     const count = (this.counters.get(placeholderPrefix) ?? 0) + 1
     this.counters.set(placeholderPrefix, count)
 
-    const placeholder = `[${placeholderPrefix}${toAlphabeticSequence(count)}]`
-    this.originalToPlaceholder.set(original, placeholder)
+    const replacement = createReplacement
+      ? createReplacement(count)
+      : `[${placeholderPrefix}${toAlphabeticSequence(count)}]`
+    this.originalToPlaceholder.set(original, replacement)
     if (reversible) {
-      this.placeholderToOriginal.set(placeholder, original)
+      this.placeholderToOriginal.set(replacement, original)
     }
 
-    return placeholder
+    return replacement
   }
 
   resolve(placeholder: string): string | undefined {
-    return this.placeholderToOriginal.get(placeholder)
+    return this.placeholderToOriginal.get(placeholder) ?? this.resolveNormalized(placeholder)
   }
 
   replaceAllPlaceholders(input: string): string {
@@ -64,7 +67,13 @@ export class MappingTable {
       'g',
     )
 
-    return input.replace(pattern, (match) => this.placeholderToOriginal.get(match) ?? match)
+    const exactReplaced = input.replace(pattern, (match) => this.placeholderToOriginal.get(match) ?? match)
+
+    // A model may turn brackets full-width, add spaces, or use Japanese quotes.
+    // Only replace candidates that normalize to a placeholder we actually issued.
+    return exactReplaced.replace(/(?:\[[^\]\r\n]{1,256}\]|［[^］\r\n]{1,256}］|「[^」\r\n]{1,256}」)/gu, (match) => {
+      return this.resolveNormalized(match) ?? match
+    })
   }
 
   getLongestPlaceholderLength(): number {
@@ -80,4 +89,25 @@ export class MappingTable {
     this.placeholderToOriginal.clear()
     this.counters.clear()
   }
+
+  private resolveNormalized(value: string): string | undefined {
+    const normalized = normalizePlaceholder(value)
+    if (normalized === value) return undefined
+
+    for (const [placeholder, original] of this.placeholderToOriginal) {
+      if (normalizePlaceholder(placeholder) === normalized) return original
+    }
+    return undefined
+  }
+}
+
+function normalizePlaceholder(value: string): string {
+  let normalized = value
+  if (normalized.startsWith('「') && normalized.endsWith('」')) {
+    normalized = `[${normalized.slice(1, -1)}]`
+  }
+  normalized = normalized.replaceAll('［', '[').replaceAll('］', ']')
+  if (!normalized.startsWith('[') || !normalized.endsWith(']')) return value
+
+  return `[${normalized.slice(1, -1).replace(/\s+/gu, '')}]`
 }

@@ -111,13 +111,14 @@ model: cloakroom:利用するモデル名
 |---|---|---|
 | `enabled` | `true` | フィルタ全体の有効/無効。`false` ならマスク・復元とも行わない |
 | `maxRequestBodyBytes` | `67108864` (64 MiB) | リクエスト本文の最大サイズ。超過時は上流へ転送せず `413 Payload Too Large` を返す |
+| `mode` | `"pseudonymize"` | `"pseudonymize"` はプレースホルダへ置換、`"anonymize"` は復元不能なプレースホルダへ置換、`"fake"` は復元可能なダミー値へ置換 |
 | `categories` | 組み込み全21カテゴリ (`URL_USER` を除く) | 有効化するPIIカテゴリ。`URL_USER`(URL内Basic認証情報)だけは既定では含まれず、使うには明示的に追加する必要がある |
 | `ollamaEndpoint` | `"http://localhost:11434"` | Ollama APIのエンドポイント。既定では `localhost` / `127.*` / `::1` のみ許可される |
 | `allowRemoteOllama` | `false` | `true` にするとリモートOllamaエンドポイントを許可する。未マスクの固有名詞が送信され得るため、信頼できるホストに限定する |
 | `ollamaModel` | `"gemma3:4b"` | 使用するOllamaモデル |
 | `ollamaEnabled` | `false` | Ollamaによる `NAME`/`ORG`/`SCHOOL` 検出を使うか(デフォルト無効のオプション機能) |
 | `heuristicNerEnabled` | `true` | 組み込みヒューリスティックNER(姓辞書+文脈ルールによる `NAME`/`ORG`/`SCHOOL` 自動検出)を使うか。ゼロランタイム依存で動作し、`false` にすると無効化できる |
-| `customPatterns` | `[]` | 追加の正規表現({`name`, `pattern`, `category?`})。`category` があればそのカテゴリ、なければ `name` をカテゴリ名として使う |
+| `customPatterns` | `[]` | 追加の正規表現({`name`, `pattern`, `category?`, `flags?`, `captureGroup?`})。`flags` は `i`/`s`/`u`、`captureGroup` は置換するキャプチャグループを指定する |
 | `plugins` | `[]` | ローカルJavaScriptモジュールの絶対パス。`default`、`plugin`、`plugins` のいずれかで `detect(text)` を持つプラグインをexportする。TypeScriptはNode 22で `NODE_OPTIONS=--experimental-strip-types` を付けるか、`.mjs`へコンパイルして使う |
 | `dictionary` | `[]` | 完全一致で検出する既知の値({`text`, `category`})。正規表現・Ollamaより先に評価される |
 | `allowlist` | `[]` | ここに含まれる文字列(完全一致)は検出されてもマスクされない |
@@ -181,7 +182,9 @@ curl -X POST http://127.0.0.1:8787/control/disable/PHONE
 
 ## 検出対象のPII種別(正規表現)
 
-`EMAIL`, `PHONE`(日本/国際形式), `ADDRESS`(日本の住所), `URL_USER`(URL内の認証情報), `API_KEY`(`sk-`, `ghp_`, `gho_`, `github_pat_`, `AKIA`, `xox[bpras]-`, `sk-ant-` 等), `CREDIT_CARD`(Luhn検証あり), `MY_NUMBER`(マイナンバー形式), `NAME`(Gitの `Author:`/`Committer:` トレーラーのみ), `SSN`, `IP_ADDRESS`(IPv4/IPv6), `POSTAL_CODE`(郵便番号)。`NAME` / `ORG` / `SCHOOL` の一般的な検出はヒューリスティックNER段(既定有効)が担当し、Ollama LLM(オプション)はその精度を補強する。
+`EMAIL`, `PHONE`(日本/国際形式), `ADDRESS`(日本の住所), `URL_USER`(URL内の認証情報), `API_KEY`(OpenAI/Anthropic/GitHub/Slack/Stripe/Google/AWS形式、PEM秘密鍵、JWT、文脈付き高エントロピートークン), `CREDIT_CARD`(Luhn検証あり), `MY_NUMBER`(マイナンバー形式), `NAME`(Gitの `Author:`/`Committer:` トレーラーのみ), `SSN`, `IP_ADDRESS`(IPv4/IPv6), `POSTAL_CODE`(郵便番号)。シークレット値を外部サービスへ照会して検証することはない。`NAME` / `ORG` / `SCHOOL` の一般的な検出はヒューリスティックNER段(既定有効)が担当し、Ollama LLM(オプション)はその精度を補強する。
+
+`fake` モードは、メールアドレスを `person1@example.com` のような安全なダミー値に置き換え、同じプロキシセッション内では元の値へ復元できる。モデルがプレースホルダを全角角括弧・日本語のかぎ括弧・空白入りで返しても、発行済みの値だけを復元する。`thinking` と `redacted_thinking` ブロックは署名を壊したりPIIを再挿入したりしないよう、プレースホルダのまま保持する。
 
 ## ヒューリスティックNER(組み込み、Ollama不要)
 

@@ -17,7 +17,8 @@ export class TextDeltaRestorer {
     let output = ''
 
     while (this.pending.length > 0) {
-      const openIdx = this.pending.indexOf('[')
+      const opening = this.pending.match(/[\[［「]/u)
+      const openIdx = opening?.index ?? -1
       if (openIdx === -1) {
         output += this.pending
         this.pending = ''
@@ -27,7 +28,9 @@ export class TextDeltaRestorer {
       output += this.pending.slice(0, openIdx)
       this.pending = this.pending.slice(openIdx)
 
-      const closeIdx = this.pending.indexOf(']')
+      const openChar = this.pending[0] ?? ''
+      const closeChar = openChar === '[' ? ']' : openChar === '［' ? '］' : '」'
+      const closeIdx = this.pending.indexOf(closeChar)
       if (closeIdx === -1) {
         if (this.pending.length > this.getMaxPendingLength()) {
           output += this.pending[0]

@@ -9,7 +9,10 @@ type PatternDef = {
 
 export function selectNonOverlappingMatches(matches: readonly PIIMatch[]): readonly PIIMatch[] {
   const sorted = [...matches].sort(
-    (left, right) => left.start - right.start || (right.end - right.start) - (left.end - left.start),
+    (left, right) =>
+      left.start - right.start ||
+      right.confidence - left.confidence ||
+      (right.end - right.start) - (left.end - left.start),
   )
 
   const winners: PIIMatch[] = []
@@ -67,6 +70,45 @@ function myNumberCheck(input: string): boolean {
   return checkDigit === digits[11]
 }
 
+function jwtCheck(input: string): boolean {
+  const [header] = input.split('.')
+  if (!header) return false
+
+  try {
+    const decoded = Buffer.from(header, 'base64url').toString('utf8')
+    const parsed = JSON.parse(decoded) as Record<string, unknown>
+    return typeof parsed['alg'] === 'string' && parsed['alg'].length > 0
+  } catch {
+    return false
+  }
+}
+
+function shannonEntropy(input: string): number {
+  const counts = new Map<string, number>()
+  for (const char of input) counts.set(char, (counts.get(char) ?? 0) + 1)
+
+  let entropy = 0
+  for (const count of counts.values()) {
+    const probability = count / input.length
+    entropy -= probability * Math.log2(probability)
+  }
+  return entropy
+}
+
+function highEntropySecretCheck(input: string): boolean {
+  return input.length >= 20 && shannonEntropy(input) >= 3.5
+}
+
+function withIndices(regex: RegExp): RegExp {
+  return regex.flags.includes('d') ? new RegExp(regex.source, regex.flags) : new RegExp(regex.source, `${regex.flags}d`)
+}
+
+function getCustomFlags(flags: string | undefined): string {
+  const allowed = new Set(['i', 's', 'u'])
+  const selected = [...new Set([...(flags ?? '')].filter((flag) => allowed.has(flag)))].join('')
+  return `g${selected}`
+}
+
 function normalizeDictionaryChar(char: string, caseSensitive: boolean): string {
   const code = char.charCodeAt(0)
   const halfWidth =
@@ -116,7 +158,29 @@ const PATTERNS: readonly PatternDef[] = [
   {
     category: 'API_KEY',
     pattern:
-      /\b(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{36,}|gho_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|AKIA[0-9A-Z]{16}|xox[bpras]-[A-Za-z0-9\-]{10,}|sk-ant-[A-Za-z0-9\-]{20,})\b/g,
+      /\b(sk-(?:proj-|ant-)?[A-Za-z0-9\-]{20,}|gh[pous]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|(?:AKIA|ASIA)[0-9A-Z]{16}|xox[bpras]-[A-Za-z0-9\-]{10,}|sk_(?:live|test)_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{35})\b/g,
+  },
+  {
+    category: 'API_KEY',
+    pattern:
+      /(?:aws_secret_access_key|AWS_SECRET_ACCESS_KEY)\s*[:=]\s*([A-Za-z0-9/+=]{40})\b/g,
+    captureGroup: 1,
+  },
+  {
+    category: 'API_KEY',
+    pattern: /-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----[\s\S]+?-----END(?: [A-Z0-9]+)? PRIVATE KEY-----/g,
+  },
+  {
+    category: 'API_KEY',
+    pattern: /\b(eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b/g,
+    captureGroup: 1,
+    validate: jwtCheck,
+  },
+  {
+    category: 'API_KEY',
+    pattern: /(?:api[_-]?key|secret|token|password)\s*[:=]\s*([A-Za-z0-9+/_-]{20,}={0,2})(?![A-Za-z0-9+/_=-])/gi,
+    captureGroup: 1,
+    validate: highEntropySecretCheck,
   },
   { category: 'EMAIL', pattern: /[\w.+-]+@[\w-]+\.[\w.-]+/g },
   {
@@ -307,7 +371,7 @@ export function detectRegexPII(
   for (const def of PATTERNS) {
     if (!categorySet.has(def.category)) continue
 
-    const regex = new RegExp(def.pattern.source, def.pattern.flags)
+    const regex = withIndices(def.pattern)
     let m: RegExpExecArray | null
     while ((m = regex.exec(text)) !== null) {
       const group = def.captureGroup ?? 0
@@ -315,14 +379,15 @@ export function detectRegexPII(
       if (!matchText) continue
       if (def.validate && !def.validate(matchText)) continue
 
-      const start =
-        group > 0 && m[group] ? m.index + m[0].indexOf(m[group]) : m.index
+      const groupIndex = m.indices?.[group]
+      const start = groupIndex?.[0] ?? m.index
+      const end = groupIndex?.[1] ?? start + matchText.length
 
       matches.push({
         text: matchText,
         category: def.category,
         start,
-        end: start + matchText.length,
+        end,
         confidence: 1,
       })
     }
@@ -333,7 +398,7 @@ export function detectRegexPII(
     if (!categorySet.has(category)) continue
 
     try {
-      const regex = new RegExp(custom.pattern, 'g')
+      const regex = withIndices(new RegExp(custom.pattern, getCustomFlags(custom.flags)))
       let m: RegExpExecArray | null
       while ((m = regex.exec(text)) !== null) {
         if (!m[0]) {
@@ -341,11 +406,18 @@ export function detectRegexPII(
           continue
         }
 
+        const group = custom.captureGroup ?? 0
+        const matchText = m[group] ?? m[0]
+        const groupIndex = m.indices?.[group]
+        const start = groupIndex?.[0] ?? m.index
+        const end = groupIndex?.[1] ?? start + matchText.length
+        if (!matchText) continue
+
         matches.push({
-          text: m[0],
+          text: matchText,
           category,
-          start: m.index,
-          end: m.index + m[0].length,
+          start,
+          end,
           confidence: 1,
         })
       }
