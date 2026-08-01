@@ -105,6 +105,12 @@ export type FilterPlugin = {
   detect(text: string): readonly FilterPluginMatch[] | Promise<readonly FilterPluginMatch[]>
 }
 
+export type VaultData = {
+  originalToPlaceholder: Record<string, string>
+  placeholderToOriginal: Record<string, string>
+  counters: Record<string, number>
+}
+
 export type PIIMode = 'pseudonymize' | 'anonymize' | 'fake'
 
 export type CategoryAction = 'mask' | 'block' | 'warn'
@@ -149,6 +155,8 @@ export type PIIFilterConfig = {
   readonly categoryOptions: Partial<Record<PIICategory, CategoryOption>>
   readonly responseDetection?: ResponseDetectionConfig
   readonly providerOverrides?: Partial<Record<'anthropic' | 'openai', Partial<Pick<PIIFilterConfig, 'enabled' | 'categories' | 'categoryActions'>>>>
+  readonly vaultEnabled?: boolean
+  readonly vaultTtlMinutes?: number
 }
 
 export const DEFAULT_CONFIG: PIIFilterConfig = {
@@ -196,4 +204,6 @@ export const DEFAULT_CONFIG: PIIFilterConfig = {
   categoryOptions: {},
   responseDetection: { enabled: false, action: 'warn' },
   providerOverrides: {},
+  vaultEnabled: false,
+  vaultTtlMinutes: 30,
 }

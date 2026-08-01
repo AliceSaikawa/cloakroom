@@ -141,6 +141,11 @@ export function loadPIIConfig(): PIIFilterConfig {
       categoryOptions: parseCategoryOptions(parsed.categoryOptions),
       responseDetection: parseResponseDetection(parsed.responseDetection),
       providerOverrides: parseProviderOverrides(parsed.providerOverrides),
+      vaultEnabled: parsed.vaultEnabled === true,
+      vaultTtlMinutes:
+        typeof parsed.vaultTtlMinutes === 'number' && parsed.vaultTtlMinutes > 0
+          ? parsed.vaultTtlMinutes
+          : DEFAULT_CONFIG.vaultTtlMinutes,
       auditLog: {
         enabled: Boolean(auditLog.enabled),
         destination: auditLog.destination === 'file' ? 'file' : 'stderr',

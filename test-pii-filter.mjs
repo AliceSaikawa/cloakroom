@@ -50,6 +50,7 @@ async function loadActualModules() {
       const entries = [
         ['config.ts', 'config.mjs'],
         ['controlState.ts', 'controlState.mjs'],
+        ['mappingTable.ts', 'mappingTable.mjs'],
         ['piiFilter.ts', 'piiFilter.mjs'],
         ['provider.ts', 'provider.mjs'],
         ['regexFilter.ts', 'regexFilter.mjs'],
@@ -61,6 +62,7 @@ async function loadActualModules() {
         ['responseRestorer.ts', 'responseRestorer.mjs'],
         ['sessionFilterStore.ts', 'sessionFilterStore.mjs'],
         ['stats.ts', 'stats.mjs'],
+        ['vault.ts', 'vault.mjs'],
       ]
 
       try {
@@ -81,6 +83,7 @@ async function loadActualModules() {
         const [
           config,
           controlState,
+          mappingTable,
           piiFilter,
           provider,
           regexFilter,
@@ -92,9 +95,11 @@ async function loadActualModules() {
           responseRestorer,
           sessionFilterStore,
           stats,
+          vault,
         ] = await Promise.all([
           import(pathToFileURL(join(bundleDir, 'config.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'controlState.mjs')).href),
+          import(pathToFileURL(join(bundleDir, 'mappingTable.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'piiFilter.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'provider.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'regexFilter.mjs')).href),
@@ -106,11 +111,13 @@ async function loadActualModules() {
           import(pathToFileURL(join(bundleDir, 'responseRestorer.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'sessionFilterStore.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'stats.mjs')).href),
+          import(pathToFileURL(join(bundleDir, 'vault.mjs')).href),
         ])
 
         return {
           config,
           controlState,
+          mappingTable,
           piiFilter,
           provider,
           regexFilter,
@@ -122,6 +129,7 @@ async function loadActualModules() {
           responseRestorer,
           sessionFilterStore,
           stats,
+          vault,
           bundleDir,
         }
       } catch (error) {
@@ -2023,6 +2031,73 @@ async function testContextPreservingPlaceholders() {
 }
 
 // ============================================================
+// Vault Persistence
+// ============================================================
+async function testVaultPersistence() {
+  console.log('\n=== Vault Persistence ===')
+
+  const { MappingTable } = (await loadActualModules()).mappingTable
+  const { encryptData, decryptData, saveSessionVault, loadSessionVault, deleteSessionVault } =
+    (await loadActualModules()).vault
+
+  const TEST_SESSION = 'test-vault-session-cloakroom-001'
+
+  try {
+    // 1. Build a MappingTable and register some entries
+    const table = new MappingTable()
+    table.register('alice@example.com', 'EMAIL', 'メールアドレス', true)
+    table.register('03-1234-5678', 'PHONE', '電話番号', true)
+
+    // 2. Serialize to VaultData
+    const vaultData = table.toJSON()
+    assert(
+      Object.keys(vaultData.originalToPlaceholder).length === 2,
+      'toJSON: should have 2 original→placeholder entries',
+    )
+    assert(
+      Object.keys(vaultData.placeholderToOriginal).length === 2,
+      'toJSON: should have 2 placeholder→original entries',
+    )
+    console.log('  PASS: MappingTable.toJSON() serializes correctly')
+
+    // 3. AES-256-GCM encrypt/decrypt roundtrip with explicit key
+    const key = Buffer.alloc(32, 0x42)
+    const json = JSON.stringify(vaultData)
+    const encrypted = encryptData(json, key)
+    const decrypted = decryptData(encrypted, key)
+    assert(decrypted === json, `encryptData/decryptData: roundtrip mismatch; got: ${decrypted}`)
+    console.log('  PASS: encryptData/decryptData roundtrip works')
+
+    // 4. saveSessionVault / loadSessionVault roundtrip (uses on-disk key)
+    saveSessionVault(TEST_SESSION, vaultData)
+    const loaded = loadSessionVault(TEST_SESSION)
+    assert(loaded !== null, 'loadSessionVault: should return non-null after save')
+    assert(
+      JSON.stringify(loaded) === JSON.stringify(vaultData),
+      'loadSessionVault: loaded data should match saved data',
+    )
+    console.log('  PASS: saveSessionVault/loadSessionVault roundtrip works')
+
+    // 5. Restore MappingTable from loaded data and verify resolve
+    const restored = MappingTable.fromJSON(loaded)
+    const restoredEmail = restored.resolve('[メールアドレスA]')
+    assert(
+      restoredEmail === 'alice@example.com',
+      `fromJSON: email restore failed; got: ${restoredEmail}`,
+    )
+    const restoredPhone = restored.resolve('[電話番号A]')
+    assert(
+      restoredPhone === '03-1234-5678',
+      `fromJSON: phone restore failed; got: ${restoredPhone}`,
+    )
+    console.log('  PASS: MappingTable.fromJSON() restores state correctly')
+  } finally {
+    deleteSessionVault(TEST_SESSION)
+    console.log('  Vault test file cleaned up')
+  }
+}
+
+// ============================================================
 // Run
 // ============================================================
 const runProxy = process.argv.includes('--proxy')
@@ -2048,6 +2123,7 @@ try {
   await testCategoryActions()
   await testContextPreservingPlaceholders()
   await testResponseDetection()
+  await testVaultPersistence()
 
   if (runProxy) {
     await testActualProxy()

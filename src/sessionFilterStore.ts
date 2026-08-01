@@ -1,9 +1,11 @@
 import type { IncomingMessage } from 'node:http'
 import type { Socket } from 'node:net'
 import { readHeader } from './httpUtils.js'
+import { MappingTable } from './mappingTable.js'
 import { PIIFilter } from './piiFilter.js'
 import { resolveProvider } from './provider.js'
 import type { PIIFilterConfig } from './types.js'
+import { cleanExpiredVaults, deleteSessionVault, loadSessionVault, saveSessionVault } from './vault.js'
 
 const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000
 const SESSION_ID_HEADERS = ['x-pii-session-id', 'anthropic-session-id', 'x-session-id'] as const
@@ -24,6 +26,8 @@ export class SessionFilterStore {
   private readonly explicitSessions = new Map<string, SessionEntry>()
   private socketSessions = new WeakMap<Socket, PIIFilter>()
   private socketFilters = new Set<PIIFilter>()
+  // Track which (socket, sessionId) pairs already have a vault-save listener
+  private readonly registeredSaveListeners = new WeakMap<Socket, Set<string>>()
 
   constructor(private config?: PIIFilterConfig) {}
 
@@ -41,8 +45,15 @@ export class SessionFilterStore {
     if (explicitSessionId) {
       if (shouldResetSession(req)) {
         this.explicitSessions.delete(explicitSessionId)
+        if (this.config?.vaultEnabled) {
+          deleteSessionVault(explicitSessionId)
+        }
       }
-      return this.acquireExplicitSession(explicitSessionId)
+      const filter = this.acquireExplicitSession(explicitSessionId)
+      if (this.config?.vaultEnabled) {
+        this.registerVaultSaveOnClose(req.socket, explicitSessionId, filter)
+      }
+      return filter
     }
 
     if (shouldResetSession(req)) {
@@ -75,12 +86,33 @@ export class SessionFilterStore {
       return existing.filter
     }
 
+    let mappingTable: MappingTable | undefined
+    if (this.config?.vaultEnabled) {
+      const vaultData = loadSessionVault(sessionId)
+      if (vaultData) {
+        mappingTable = MappingTable.fromJSON(vaultData)
+      }
+    }
+
     const created = {
-      filter: new PIIFilter(this.config),
+      filter: new PIIFilter(this.config, mappingTable),
       expiresAt: Date.now() + DEFAULT_SESSION_TTL_MS,
     }
     this.explicitSessions.set(sessionId, created)
     return created.filter
+  }
+
+  private registerVaultSaveOnClose(socket: Socket, sessionId: string, filter: PIIFilter): void {
+    let sessions = this.registeredSaveListeners.get(socket)
+    if (!sessions) {
+      sessions = new Set()
+      this.registeredSaveListeners.set(socket, sessions)
+    }
+    if (sessions.has(sessionId)) return
+    sessions.add(sessionId)
+    socket.once('close', () => {
+      saveSessionVault(sessionId, filter.getMappingTable().toJSON())
+    })
   }
 
   private acquireSocketSession(socket: Socket): PIIFilter {
@@ -105,8 +137,15 @@ export class SessionFilterStore {
 
   private pruneExpiredSessions(): void {
     const now = Date.now()
+    if (this.config?.vaultEnabled) {
+      const ttlMs = (this.config.vaultTtlMinutes ?? 30) * 60 * 1000
+      cleanExpiredVaults(ttlMs)
+    }
     for (const [sessionId, entry] of this.explicitSessions.entries()) {
       if (entry.expiresAt <= now) {
+        if (this.config?.vaultEnabled) {
+          saveSessionVault(sessionId, entry.filter.getMappingTable().toJSON())
+        }
         this.explicitSessions.delete(sessionId)
       }
     }
