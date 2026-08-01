@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url'
 import type { FilterPlugin, FilterPluginMatch, PIICategory, PIIMatch } from './types.js'
 
 const pluginCache = new Map<string, Promise<readonly FilterPlugin[]>>()
+let pluginCacheVersion = 0
 
 // Plugin detect() receives unmasked text, so an error message may embed raw
 // PII. Log only the first line, hard-capped, to keep it out of stderr.
@@ -36,7 +37,11 @@ function isFilterPlugin(value: unknown): value is FilterPlugin {
 }
 
 async function loadPlugin(path: string): Promise<readonly FilterPlugin[]> {
-  const loaded = await import(pathToFileURL(path).href)
+  const url = pathToFileURL(path)
+  // Node caches ESM modules by URL. Change the query on an explicit reload so
+  // edits to a configured plugin take effect without restarting the proxy.
+  url.searchParams.set('cloakroomPluginVersion', String(pluginCacheVersion))
+  const loaded = await import(url.href)
   const candidates = [loaded.default, loaded.plugin, ...(Array.isArray(loaded.plugins) ? loaded.plugins : [])]
   return candidates.filter(isFilterPlugin)
 }
@@ -108,4 +113,5 @@ export async function detectPluginPII(
 
 export function resetPluginCache(): void {
   pluginCache.clear()
+  pluginCacheVersion += 1
 }

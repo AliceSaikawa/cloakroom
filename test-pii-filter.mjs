@@ -8,6 +8,7 @@
 
 import { strict as assert } from 'node:assert'
 import { execFileSync } from 'node:child_process'
+import { EventEmitter } from 'node:events'
 
 // Scenarios 1 & 2: inline filter logic (no server import to avoid port binding)
 // Scenario 3: HTTP requests to already-running proxy
@@ -15,6 +16,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { request } from 'node:http'
+import { Readable } from 'node:stream'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const CONFIG_PATH = join(homedir(), '.claude', 'pii-filter.json')
@@ -53,6 +55,11 @@ async function loadActualModules() {
         ['regexFilter.ts', 'regexFilter.mjs'],
         ['streamRestorer.ts', 'streamRestorer.mjs'],
         ['openaiStreamRestorer.ts', 'openaiStreamRestorer.mjs'],
+        ['controlCategory.ts', 'controlCategory.mjs'],
+        ['pluginLoader.ts', 'pluginLoader.mjs'],
+        ['requestBody.ts', 'requestBody.mjs'],
+        ['responseRestorer.ts', 'responseRestorer.mjs'],
+        ['sessionFilterStore.ts', 'sessionFilterStore.mjs'],
       ]
 
       try {
@@ -70,7 +77,20 @@ async function loadActualModules() {
           )
         }
 
-        const [config, controlState, piiFilter, provider, regexFilter, anthropicStream, openaiStream] = await Promise.all([
+        const [
+          config,
+          controlState,
+          piiFilter,
+          provider,
+          regexFilter,
+          anthropicStream,
+          openaiStream,
+          controlCategory,
+          pluginLoader,
+          requestBody,
+          responseRestorer,
+          sessionFilterStore,
+        ] = await Promise.all([
           import(pathToFileURL(join(bundleDir, 'config.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'controlState.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'piiFilter.mjs')).href),
@@ -78,9 +98,28 @@ async function loadActualModules() {
           import(pathToFileURL(join(bundleDir, 'regexFilter.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'streamRestorer.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'openaiStreamRestorer.mjs')).href),
+          import(pathToFileURL(join(bundleDir, 'controlCategory.mjs')).href),
+          import(pathToFileURL(join(bundleDir, 'pluginLoader.mjs')).href),
+          import(pathToFileURL(join(bundleDir, 'requestBody.mjs')).href),
+          import(pathToFileURL(join(bundleDir, 'responseRestorer.mjs')).href),
+          import(pathToFileURL(join(bundleDir, 'sessionFilterStore.mjs')).href),
         ])
 
-        return { config, controlState, piiFilter, provider, regexFilter, anthropicStream, openaiStream, bundleDir }
+        return {
+          config,
+          controlState,
+          piiFilter,
+          provider,
+          regexFilter,
+          anthropicStream,
+          openaiStream,
+          controlCategory,
+          pluginLoader,
+          requestBody,
+          responseRestorer,
+          sessionFilterStore,
+          bundleDir,
+        }
       } catch (error) {
         rmSync(bundleDir, { recursive: true, force: true })
         throw error
@@ -840,6 +879,158 @@ async function testPrivacyControlFeatures() {
   }
 }
 
+async function testProxySafetyRegressions() {
+  console.log('\n=== Proxy Safety Regressions ===')
+
+  const {
+    controlCategory,
+    piiFilter,
+    pluginLoader,
+    provider,
+    requestBody,
+    responseRestorer,
+    sessionFilterStore,
+  } = await loadActualModules()
+  const baseConfig = {
+    enabled: true,
+    mode: 'pseudonymize',
+    maxRequestBodyBytes: 1024,
+    categories: ['EMAIL', 'PHONE'],
+    ollamaEndpoint: 'http://localhost:11434',
+    allowRemoteOllama: false,
+    ollamaModel: 'gemma3:4b',
+    ollamaEnabled: false,
+    heuristicNerEnabled: false,
+    customPatterns: [],
+    customCategories: [],
+    plugins: [],
+    dictionary: [],
+    allowlist: [],
+    auditLog: { enabled: false, destination: 'stderr', reviewThreshold: 0.8 },
+  }
+
+  {
+    const config = {
+      ...baseConfig,
+      customCategories: [{ name: 'project_code', patterns: ['PRJ-\\d+'] }],
+    }
+    assert.equal(
+      controlCategory.resolveConfiguredCategory('project_code', config),
+      'project_code',
+      '#65: lower-case custom categories should keep their configured name',
+    )
+    assert.equal(
+      controlCategory.resolveConfiguredCategory('PROJECT_CODE', config),
+      'project_code',
+      '#65: custom categories should also allow a case-insensitive request',
+    )
+    assert.equal(
+      controlCategory.resolveConfiguredCategory('phone', config),
+      'PHONE',
+      '#65: built-in categories should accept lower-case control paths',
+    )
+    console.log('#65 custom category control names: OK')
+  }
+
+  {
+    const countTokensRequest = { method: 'POST', url: '/v1/messages/count_tokens', headers: {} }
+    assert.equal(
+      provider.shouldFilterMessagesPath(countTokensRequest),
+      true,
+      '#66: count_tokens requests must use the filtering path',
+    )
+    assert.equal(provider.resolveProvider(countTokensRequest).kind, 'anthropic')
+    console.log('#66 count_tokens filtering route: OK')
+  }
+
+  {
+    const filter = new piiFilter.PIIFilter(baseConfig)
+    const filtered = await filter.filterRequestBody({
+      messages: [{ role: 'user', content: `連絡先は ${TEST_PII.email}` }],
+    })
+    const placeholder = filtered.messages[0].content.match(/\[[^\]]+\]/)?.[0]
+    assert.ok(placeholder, '#67: test setup should create a placeholder')
+
+    const plainText = responseRestorer.restoreNonStreamingResponse(
+      Buffer.from(`upstream says ${placeholder}`),
+      'text/plain; charset=utf-8',
+      filter,
+    )
+    assert.equal(plainText, `upstream says ${TEST_PII.email}`, '#67: text responses should restore placeholders')
+
+    const invalidJson = responseRestorer.restoreNonStreamingResponse(
+      Buffer.from(`broken response: ${placeholder}`),
+      'application/json',
+      filter,
+    )
+    assert.equal(
+      invalidJson,
+      `broken response: ${TEST_PII.email}`,
+      '#67: malformed JSON should fall back to text restoration',
+    )
+    console.log('#67 non-JSON response restoration: OK')
+  }
+
+  {
+    const tmp = mkdtempSync(join(tmpdir(), 'cloakroom-plugin-reload-test-'))
+    const pluginPath = join(tmp, 'plugin.mjs')
+    writeFileSync(pluginPath, `export default { name: 'FIRST', detect: () => [] }\n`)
+    try {
+      assert.equal((await pluginLoader.loadFilterPlugins([pluginPath]))[0]?.name, 'FIRST')
+      writeFileSync(pluginPath, `export default { name: 'SECOND', detect: () => [] }\n`)
+      pluginLoader.resetPluginCache()
+      assert.equal(
+        (await pluginLoader.loadFilterPlugins([pluginPath]))[0]?.name,
+        'SECOND',
+        "#68: reset should bypass Node's ESM module cache",
+      )
+    } finally {
+      pluginLoader.resetPluginCache()
+      rmSync(tmp, { recursive: true, force: true })
+    }
+
+    const store = new sessionFilterStore.SessionFilterStore(baseConfig)
+    const req = {
+      headers: { 'x-pii-session-id': 'keep-mapping' },
+      socket: new EventEmitter(),
+    }
+    const sessionFilter = store.acquire(req)
+    const filtered = await sessionFilter.filterRequestBody({
+      messages: [{ role: 'user', content: TEST_PII.email }],
+    })
+    const placeholder = filtered.messages[0].content
+    store.reload({ ...baseConfig, categories: [] })
+    const reloadedFilter = store.acquire(req)
+    assert.equal(reloadedFilter.restoreText(placeholder), TEST_PII.email)
+    assert.equal(
+      (await reloadedFilter.filterRequestBody({ messages: [{ role: 'user', content: TEST_PII.phone }] }))
+        .messages[0].content,
+      TEST_PII.phone,
+      '#68: existing sessions should use the reloaded config without losing mappings',
+    )
+    console.log('#68 reload keeps mappings and refreshes plugins: OK')
+  }
+
+  {
+    const prechecked = Readable.from([Buffer.from('abc')])
+    prechecked.headers = { 'content-length': '3' }
+    await assert.rejects(
+      requestBody.readRequestBody(prechecked, 2),
+      requestBody.RequestBodyTooLargeError,
+      '#69: content-length over the limit should be rejected before buffering',
+    )
+
+    const streamed = Readable.from([Buffer.from('ab'), Buffer.from('c')])
+    streamed.headers = {}
+    await assert.rejects(
+      requestBody.readRequestBody(streamed, 2),
+      requestBody.RequestBodyTooLargeError,
+      '#69: a streaming body over the limit should be rejected',
+    )
+    console.log('#69 request body size limit: OK')
+  }
+}
+
 async function testJapanesePlaceholderLabels() {
   console.log('\n=== Japanese Placeholder Labels ===')
 
@@ -1333,6 +1524,7 @@ try {
   await testControlState()
   await testAdvancedSafetyRegressions()
   await testPrivacyControlFeatures()
+  await testProxySafetyRegressions()
   await testJapanesePlaceholderLabels()
   await testHeuristicNerDetection()
   await testFinancialIdentityRegexCoverage()

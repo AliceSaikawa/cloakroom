@@ -7,6 +7,13 @@ const CONFIG_PATH = join(homedir(), '.claude', 'pii-filter.json')
 
 let loadedConfig: PIIFilterConfig | null = null
 
+function normalizeMaxRequestBodyBytes(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+    return DEFAULT_CONFIG.maxRequestBodyBytes
+  }
+  return value
+}
+
 function isLoopbackHost(hostname: string): boolean {
   const normalized = hostname.toLowerCase().replace(/^\[(.*)\]$/, '$1')
   return normalized === 'localhost' || normalized === '::1' || normalized.startsWith('127.')
@@ -49,6 +56,7 @@ export function loadPIIConfig(): PIIFilterConfig {
     loadedConfig = {
       enabled: parsed.enabled ?? DEFAULT_CONFIG.enabled,
       mode: parsed.mode === 'anonymize' ? 'anonymize' : DEFAULT_CONFIG.mode,
+      maxRequestBodyBytes: normalizeMaxRequestBodyBytes(parsed.maxRequestBodyBytes),
       categories: parsed.categories ?? DEFAULT_CONFIG.categories,
       ollamaEndpoint: normalizeOllamaEndpoint(parsed.ollamaEndpoint, allowRemoteOllama),
       allowRemoteOllama,

@@ -62,8 +62,8 @@ function getCustomPatterns(config: PIIFilterConfig): readonly CustomPatternEntry
 
 export class PIIFilter {
   private readonly mappingTable = new MappingTable()
-  private readonly config: PIIFilterConfig
-  private readonly allowlist: ReadonlySet<string>
+  private config: PIIFilterConfig
+  private allowlist: ReadonlySet<string>
 
   constructor(config = loadPIIConfig()) {
     this.config = config
@@ -72,6 +72,12 @@ export class PIIFilter {
 
   isEnabled(): boolean {
     return this.config.enabled && !isPassthroughEnabled()
+  }
+
+  updateConfig(config: PIIFilterConfig): void {
+    // Keep the mapping table so placeholders issued before a reload restore.
+    this.config = config
+    this.allowlist = new Set(config.allowlist)
   }
 
   createStreamRestorer(): StreamRestorer {

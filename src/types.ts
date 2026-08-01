@@ -109,6 +109,7 @@ export type AuditLogConfig = {
 export type PIIFilterConfig = {
   readonly enabled: boolean
   readonly mode: PIIMode
+  readonly maxRequestBodyBytes: number
   readonly categories: readonly PIICategory[]
   readonly ollamaEndpoint: string
   readonly allowRemoteOllama: boolean
@@ -126,6 +127,7 @@ export type PIIFilterConfig = {
 export const DEFAULT_CONFIG: PIIFilterConfig = {
   enabled: true,
   mode: 'pseudonymize',
+  maxRequestBodyBytes: 64 * 1024 * 1024,
   categories: [
     'EMAIL',
     'PHONE',

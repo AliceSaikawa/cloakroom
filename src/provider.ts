@@ -15,7 +15,7 @@ const PROVIDERS: Record<ProviderKind, ProviderConfig> = {
     kind: 'anthropic',
     origin: 'https://api.anthropic.com',
     host: 'api.anthropic.com',
-    filteredPaths: ['/v1/messages'],
+    filteredPaths: ['/v1/messages', '/v1/messages/count_tokens'],
   },
   openai: {
     kind: 'openai',
@@ -27,6 +27,7 @@ const PROVIDERS: Record<ProviderKind, ProviderConfig> = {
 
 const PATH_TO_PROVIDER: Record<string, ProviderKind> = {
   '/v1/messages': 'anthropic',
+  '/v1/messages/count_tokens': 'anthropic',
   '/v1/chat/completions': 'openai',
 }
 

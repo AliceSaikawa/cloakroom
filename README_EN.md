@@ -110,6 +110,7 @@ Config file: `~/.claude/pii-filter.json` (created by `cloakroom init`, overwritt
 | Field | Default | Description |
 |---|---|---|
 | `enabled` | `true` | Master on/off switch. When `false`, neither masking nor restoration runs |
+| `maxRequestBodyBytes` | `67108864` (64 MiB) | Maximum request-body size. Requests above the limit receive `413 Payload Too Large` and are not sent upstream |
 | `categories` | All 21 built-in categories except `URL_USER` | Enabled PII categories. `URL_USER` (Basic-auth-style userinfo in a URL) is not included by default and must be added explicitly |
 | `ollamaEndpoint` | `"http://localhost:11434"` | Ollama API endpoint. By default, only `localhost`, `127.*`, and `::1` are allowed |
 | `allowRemoteOllama` | `false` | Allows remote Ollama endpoints when set to `true`. Use only with trusted hosts because unmasked proper nouns may be sent there |
@@ -156,6 +157,7 @@ While the server is running, its behavior can be changed via HTTP endpoints (thi
 | `GET /control/status` | Returns passthrough state, disabled categories, `filterEnabled`, and `activeCategories` |
 | `POST /control/passthrough` | Switches to full passthrough mode (both masking and restoration stop) |
 | `POST /control/filter` | Clears passthrough mode and all per-category disables, resuming full filtering |
+| `POST /control/reload` | Reloads configuration and plugins while preserving existing session placeholder mappings |
 | `POST /control/disable/<CATEGORY>` | Stops detecting a single category (unknown category returns 400) |
 | `POST /control/enable/<CATEGORY>` | Resumes detecting a single category |
 
@@ -172,10 +174,10 @@ Sending `SIGUSR1` to the server process toggles passthrough mode (`kill -USR1 <p
 
 | Provider | Filtered path | Upstream |
 |---|---|---|
-| Anthropic | `POST /v1/messages` | `https://api.anthropic.com` |
+| Anthropic | `POST /v1/messages`, `POST /v1/messages/count_tokens` | `https://api.anthropic.com` |
 | OpenAI-compatible | `POST /v1/chat/completions` | `https://api.openai.com` |
 
-Requests to any other path are passed through untouched (defaulting to Anthropic, or to OpenAI if the `x-provider: openai` header is set). Streaming (SSE) responses are supported for both Anthropic's `content_block_delta` format and OpenAI's `choices[].delta` format; text is buffered so placeholders split across chunk boundaries still restore correctly.
+Requests to any other path are passed through untouched (defaulting to Anthropic, or to OpenAI if the `x-provider: openai` header is set). Streaming (SSE) responses are supported for both Anthropic's `content_block_delta` format and OpenAI's `choices[].delta` format; text is buffered so placeholders split across chunk boundaries still restore correctly. `count_tokens` uses the masked request body, so its token count can differ slightly from the original request.
 
 ## PII categories detected by regex
 
@@ -209,6 +211,6 @@ Even with Ollama disabled, this stage provides reasonable automatic coverage of 
 - When remote Ollama is enabled, unmasked text such as proper nouns may be sent to that host. Non-loopback `ollamaEndpoint` values are rejected by default; set `allowRemoteOllama: true` only when the host is trusted
 - Runtime controls (passthrough, per-category disable) are process-wide, not per-session, and reset when the server restarts
 - For clients that do not send an explicit session ID header, the mapping only lives as long as the TCP connection stays open; once it drops, previously issued placeholders can no longer be restored
-- Paths other than `/v1/messages` and `/v1/chat/completions` are proxied without any PII filtering
+- Paths other than `/v1/messages`, `/v1/messages/count_tokens`, and `/v1/chat/completions` are proxied without any PII filtering
 - Masking PII inside source code can affect code-generation accuracy
 - Plugins execute local modules, so only configure trusted files in `plugins`. See [docs/multimodal-pii.md](docs/multimodal-pii.md) for the multimodal PII design

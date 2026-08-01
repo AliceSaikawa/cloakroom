@@ -5,14 +5,17 @@ import {
   enableCategory,
   getActiveCategories,
   getControlStatus,
-  isKnownPIICategory,
   resetControlState,
   setPassthroughEnabled,
   togglePassthrough,
 } from './controlState.js'
+import { resolveConfiguredCategory } from './controlCategory.js'
 import { loadPIIConfig, reloadPIIConfig } from './config.js'
 import { PIIFilter } from './piiFilter.js'
+import { resetPluginCache } from './pluginLoader.js'
 import { resolveProvider, shouldFilterMessagesPath } from './provider.js'
+import { RequestBodyTooLargeError, readRequestBody } from './requestBody.js'
+import { restoreNonStreamingResponse } from './responseRestorer.js'
 import { SessionFilterStore } from './sessionFilterStore.js'
 import type { PIICategory, PIIFilterConfig } from './types.js'
 
@@ -27,12 +30,7 @@ function getPort(): number {
 }
 
 function readBody(req: IncomingMessage): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = []
-    req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
-    req.on('end', () => resolve(Buffer.concat(chunks)))
-    req.on('error', reject)
-  })
+  return readRequestBody(req, loadPIIConfig().maxRequestBodyBytes)
 }
 
 function writeUpstreamResponseHeaders(upstream: IncomingMessage, res: ServerResponse): void {
@@ -68,19 +66,11 @@ function getConfiguredCategories(config: PIIFilterConfig): readonly PIICategory[
   return [...new Set([...config.categories, ...customCategories, ...customPatternCategories])]
 }
 
-function isConfiguredCategory(category: string, config: PIIFilterConfig): category is PIICategory {
-  return (
-    isKnownPIICategory(category) ||
-    config.customCategories.some((item) => item.name === category) ||
-    config.customPatterns.some((item) => (item.category ?? item.name) === category)
-  )
-}
-
 function reloadRuntimeConfig(): void {
-  reloadPIIConfig()
-  // Existing session filters keep their own config snapshots, so reload starts
-  // fresh sessions for requests after the config change.
-  sessionFilters.clear()
+  const config = reloadPIIConfig()
+  resetPluginCache()
+  // Keep each MappingTable so in-flight responses can still restore values.
+  sessionFilters.reload(config)
 }
 
 function writeControlStatus(res: ServerResponse): void {
@@ -98,7 +88,7 @@ function getControlCategory(req: IncomingMessage, prefix: string): string | unde
   if (!path.startsWith(prefix)) return undefined
   const rawCategory = path.slice(prefix.length)
   if (!rawCategory) return undefined
-  return decodeURIComponent(rawCategory).trim().toUpperCase()
+  return decodeURIComponent(rawCategory).trim()
 }
 
 function handleControlRequest(req: IncomingMessage, res: ServerResponse): boolean {
@@ -131,24 +121,26 @@ function handleControlRequest(req: IncomingMessage, res: ServerResponse): boolea
   if (req.method === 'POST') {
     const disabledCategory = getControlCategory(req, '/control/disable/')
     if (disabledCategory) {
-      if (!isConfiguredCategory(disabledCategory, loadPIIConfig())) {
+      const category = resolveConfiguredCategory(disabledCategory, loadPIIConfig())
+      if (!category) {
         writeJson(res, 400, { error: `Unknown PII category: ${disabledCategory}` })
         return true
       }
 
-      disableCategory(disabledCategory)
+      disableCategory(category)
       writeControlStatus(res)
       return true
     }
 
     const enabledCategory = getControlCategory(req, '/control/enable/')
     if (enabledCategory) {
-      if (!isConfiguredCategory(enabledCategory, loadPIIConfig())) {
+      const category = resolveConfiguredCategory(enabledCategory, loadPIIConfig())
+      if (!category) {
         writeJson(res, 400, { error: `Unknown PII category: ${enabledCategory}` })
         return true
       }
 
-      enableCategory(enabledCategory)
+      enableCategory(category)
       writeControlStatus(res)
       return true
     }
@@ -300,23 +292,14 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
         })
 
         upstreamRes.on('end', () => {
-          try {
-            const raw = Buffer.concat(responseChunks).toString('utf8')
-            const contentType = String(upstreamRes.headers['content-type'] ?? '')
-            if (!contentType.includes('application/json')) {
-              res.end(raw)
-              resolve()
-              return
-            }
-
-            const parsed = JSON.parse(raw)
-            const restored = filter.restoreResponseBody(parsed)
-            res.end(JSON.stringify(restored))
-            resolve()
-          } catch {
-            res.end(Buffer.concat(responseChunks))
-            resolve()
-          }
+          const contentType = String(upstreamRes.headers['content-type'] ?? '')
+          const restored = restoreNonStreamingResponse(
+            Buffer.concat(responseChunks),
+            contentType,
+            filter,
+          )
+          res.end(restored)
+          resolve()
         })
 
         upstreamRes.on('error', reject)
@@ -352,7 +335,13 @@ const server = createServer(async (req, res) => {
     }
 
     await proxyPassThrough(req, res)
-  } catch {
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      writeJson(res, 413, {
+        error: `Request body exceeds the ${error.maxBytes}-byte limit`,
+      })
+      return
+    }
     writeProxyError(res)
   }
 })
