@@ -17,6 +17,7 @@ import { resolveProvider, shouldFilterMessagesPath } from './provider.js'
 import { RequestBodyTooLargeError, readRequestBody } from './requestBody.js'
 import { restoreNonStreamingResponse } from './responseRestorer.js'
 import { SessionFilterStore } from './sessionFilterStore.js'
+import { getSnapshot, incMaskedRequests, incPassthroughRequests } from './stats.js'
 import type { PIICategory, PIIFilterConfig } from './types.js'
 
 const DEFAULT_PORT = 8787
@@ -96,6 +97,31 @@ function handleControlRequest(req: IncomingMessage, res: ServerResponse): boolea
 
   if (req.method === 'GET' && path === '/control/status') {
     writeControlStatus(res)
+    return true
+  }
+
+  if (req.method === 'GET' && path === '/control/stats') {
+    writeJson(res, 200, getSnapshot(sessionFilters.activeSessionCount()))
+    return true
+  }
+
+  if (req.method === 'GET' && path === '/metrics') {
+    const snap = getSnapshot(sessionFilters.activeSessionCount())
+    const lines: string[] = [
+      `cloakroom_masked_requests_total ${snap.maskedRequests}`,
+      `cloakroom_restored_placeholders_total ${snap.restoredPlaceholders}`,
+      `cloakroom_unresolved_placeholders_total ${snap.unresolvedPlaceholders}`,
+      `cloakroom_passthrough_requests_total ${snap.passthroughRequests}`,
+      `cloakroom_active_sessions ${snap.activeSessions}`,
+      ...Object.entries(snap.detectionsByCategory).map(
+        ([category, count]) => `cloakroom_detections_total{category="${category}"} ${count}`,
+      ),
+      ...Object.entries(snap.passthroughByPath).map(
+        ([p, count]) => `cloakroom_passthrough_by_path_total{path="${p}"} ${count}`,
+      ),
+    ]
+    res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8' })
+    res.end(lines.join('\n') + '\n')
     return true
   }
 
@@ -208,6 +234,7 @@ function normalizeUpstreamHeaders(
 async function proxyPassThrough(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await readBody(req)
   const provider = resolveProvider(req)
+  incPassthroughRequests(req.url?.split('?')[0] ?? '/')
   const headers = normalizeUpstreamHeaders(req.headers, provider.host, body.length)
 
   await new Promise<void>((resolve, reject) => {
@@ -250,6 +277,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
   // to the active keep-alive socket.
   const filter = sessionFilters.acquire(req)
   const filteredBody = await filter.filterRequestBody(parsedBody)
+  if (filter.isEnabled()) incMaskedRequests()
   const outgoingBody = Buffer.from(JSON.stringify(filteredBody), 'utf8')
   const headers = normalizeUpstreamHeaders(req.headers, provider.host, outgoingBody.length)
 

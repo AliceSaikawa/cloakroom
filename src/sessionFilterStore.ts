@@ -91,6 +91,10 @@ export class SessionFilterStore {
     return created
   }
 
+  activeSessionCount(): number {
+    return this.explicitSessions.size + this.socketFilters.size
+  }
+
   private pruneExpiredSessions(): void {
     const now = Date.now()
     for (const [sessionId, entry] of this.explicitSessions.entries()) {

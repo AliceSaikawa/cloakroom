@@ -1,6 +1,7 @@
 import { loadPIIConfig } from './config.js'
 import { getActiveCategories, isPassthroughEnabled } from './controlState.js'
 import { writeAuditLog } from './auditLog.js'
+import { incDetectionsByCategory, incRestoredPlaceholders } from './stats.js'
 import { createFakeValue } from './fakeData.js'
 import { detectHeuristicPII } from './heuristicNer.js'
 import { MappingTable } from './mappingTable.js'
@@ -107,7 +108,15 @@ export class PIIFilter {
 
   restoreText(text: string): string {
     if (this.config.mode === 'anonymize') return text
-    return this.mappingTable.replaceAllPlaceholders(text)
+    const restored = this.mappingTable.replaceAllPlaceholders(text)
+    if (restored !== text) {
+      // Count how many placeholders were substituted by checking the difference
+      const before = (text.match(/\[[^\]\r\n]{1,256}\]/gu) ?? []).length
+      const after = (restored.match(/\[[^\]\r\n]{1,256}\]/gu) ?? []).length
+      const resolved = before - after
+      if (resolved > 0) incRestoredPlaceholders(resolved)
+    }
+    return restored
   }
 
   restoreResponseBody<T>(payload: T): T {
@@ -180,6 +189,8 @@ export class PIIFilter {
         ? (count) => createFakeValue(match.category, count)
         : undefined,
     )
+
+    incDetectionsByCategory(match.category)
 
     writeAuditLog(this.config.auditLog, {
       timestamp: new Date().toISOString(),

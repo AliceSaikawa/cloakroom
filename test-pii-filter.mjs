@@ -60,6 +60,7 @@ async function loadActualModules() {
         ['requestBody.ts', 'requestBody.mjs'],
         ['responseRestorer.ts', 'responseRestorer.mjs'],
         ['sessionFilterStore.ts', 'sessionFilterStore.mjs'],
+        ['stats.ts', 'stats.mjs'],
       ]
 
       try {
@@ -90,6 +91,7 @@ async function loadActualModules() {
           requestBody,
           responseRestorer,
           sessionFilterStore,
+          stats,
         ] = await Promise.all([
           import(pathToFileURL(join(bundleDir, 'config.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'controlState.mjs')).href),
@@ -103,6 +105,7 @@ async function loadActualModules() {
           import(pathToFileURL(join(bundleDir, 'requestBody.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'responseRestorer.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'sessionFilterStore.mjs')).href),
+          import(pathToFileURL(join(bundleDir, 'stats.mjs')).href),
         ])
 
         return {
@@ -118,6 +121,7 @@ async function loadActualModules() {
           requestBody,
           responseRestorer,
           sessionFilterStore,
+          stats,
           bundleDir,
         }
       } catch (error) {
@@ -1463,6 +1467,62 @@ async function testUsernameAndCredentials() {
   console.log('Username and Credentials PASSED')
 }
 
+async function testStatsEndpoints() {
+  console.log('\n=== Stats Endpoints (#79) ===')
+
+  const { stats } = await loadActualModules()
+
+  // Reset to a clean state before testing
+  stats.resetStats()
+
+  // Initial snapshot should be all zeroes
+  const snap0 = stats.getSnapshot(0)
+  assert.equal(snap0.maskedRequests, 0, '#79: initial maskedRequests should be 0')
+  assert.equal(snap0.passthroughRequests, 0, '#79: initial passthroughRequests should be 0')
+  assert.equal(snap0.restoredPlaceholders, 0, '#79: initial restoredPlaceholders should be 0')
+  assert.equal(snap0.unresolvedPlaceholders, 0, '#79: initial unresolvedPlaceholders should be 0')
+  assert.deepEqual(snap0.detectionsByCategory, {}, '#79: initial detectionsByCategory should be empty')
+  assert.deepEqual(snap0.passthroughByPath, {}, '#79: initial passthroughByPath should be empty')
+
+  // Increment counters
+  stats.incMaskedRequests()
+  stats.incMaskedRequests()
+  stats.incPassthroughRequests('/v1/models')
+  stats.incPassthroughRequests('/v1/models')
+  stats.incPassthroughRequests('/health')
+  stats.incDetectionsByCategory('EMAIL')
+  stats.incDetectionsByCategory('EMAIL')
+  stats.incDetectionsByCategory('PHONE')
+  stats.incRestoredPlaceholders(5)
+  stats.incUnresolvedPlaceholders(2)
+
+  const snap = stats.getSnapshot(7)
+  assert.equal(snap.maskedRequests, 2, '#79: maskedRequests should accumulate')
+  assert.equal(snap.passthroughRequests, 3, '#79: passthroughRequests should accumulate')
+  assert.equal(snap.passthroughByPath['/v1/models'], 2, '#79: passthroughByPath should track per-path')
+  assert.equal(snap.passthroughByPath['/health'], 1, '#79: passthroughByPath should track distinct paths')
+  assert.equal(snap.detectionsByCategory['EMAIL'], 2, '#79: detectionsByCategory EMAIL')
+  assert.equal(snap.detectionsByCategory['PHONE'], 1, '#79: detectionsByCategory PHONE')
+  assert.equal(snap.restoredPlaceholders, 5, '#79: restoredPlaceholders should accumulate')
+  assert.equal(snap.unresolvedPlaceholders, 2, '#79: unresolvedPlaceholders should accumulate')
+  assert.equal(snap.activeSessions, 7, '#79: activeSessions should come from parameter')
+
+  // getSnapshot should return independent copies (immutability)
+  snap.detectionsByCategory['LEAK'] = 99
+  const snap2 = stats.getSnapshot(0)
+  assert.equal(snap2.detectionsByCategory['LEAK'], undefined, '#79: getSnapshot copies should be independent')
+
+  // resetStats should clear all counters
+  stats.resetStats()
+  const snap3 = stats.getSnapshot(0)
+  assert.equal(snap3.maskedRequests, 0, '#79: resetStats should clear maskedRequests')
+  assert.equal(snap3.passthroughRequests, 0, '#79: resetStats should clear passthroughRequests')
+  assert.deepEqual(snap3.detectionsByCategory, {}, '#79: resetStats should clear detectionsByCategory')
+  assert.deepEqual(snap3.passthroughByPath, {}, '#79: resetStats should clear passthroughByPath')
+
+  console.log('#79 Stats module (in-memory): OK')
+}
+
 // ============================================================
 // Scenario 2: Filter OFF
 // ============================================================
@@ -1680,6 +1740,7 @@ try {
   await testFinancialIdentityRegexCoverage()
   await testSensitiveRecordRegexCoverage()
   await testUsernameAndCredentials()
+  await testStatsEndpoints()
 
   if (runProxy) {
     await testActualProxy()
