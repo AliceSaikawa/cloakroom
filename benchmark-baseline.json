@@ -1,0 +1,14 @@
+{
+  "EMAIL": {
+    "recall": 1
+  },
+  "PHONE": {
+    "recall": 1
+  },
+  "CREDIT_CARD": {
+    "recall": 1
+  },
+  "API_KEY": {
+    "recall": 1
+  }
+}
