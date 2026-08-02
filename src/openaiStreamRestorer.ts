@@ -14,9 +14,11 @@ export class OpenAIStreamRestorer {
   private readonly textRestorer: TextDeltaRestorer
   private sseBuffer = ''
   private lastChoiceIndex = 0
+  private readonly scanFn: (text: string) => string
 
-  constructor(mappingTable: MappingTable) {
+  constructor(mappingTable: MappingTable, scanFn?: (text: string) => string) {
     this.textRestorer = new TextDeltaRestorer(mappingTable)
+    this.scanFn = scanFn ?? ((t) => t)
   }
 
   processChunk(chunk: Buffer | string): string {
@@ -46,7 +48,7 @@ export class OpenAIStreamRestorer {
       this.sseBuffer = ''
     }
 
-    const tail = this.textRestorer.flush()
+    const tail = this.scanFn(this.textRestorer.flush())
     if (tail) {
       out += `data: ${JSON.stringify(this.createTailChunk(tail))}\n\n`
     }
@@ -73,7 +75,7 @@ export class OpenAIStreamRestorer {
       if (payload === '[DONE]') {
         // Flush any placeholder fragment before the terminal OpenAI marker so
         // the client receives the fully restored text in order.
-        const tail = this.textRestorer.flush()
+        const tail = this.scanFn(this.textRestorer.flush())
         if (tail) {
           output.push(`data: ${JSON.stringify(this.createTailChunk(tail))}`)
         }
@@ -98,7 +100,7 @@ export class OpenAIStreamRestorer {
 
             const deltaRecord = delta as Record<string, unknown>
             if (typeof deltaRecord['content'] === 'string') {
-              deltaRecord['content'] = this.textRestorer.process(deltaRecord['content'])
+              deltaRecord['content'] = this.scanFn(this.textRestorer.process(deltaRecord['content']))
             }
           }
         }

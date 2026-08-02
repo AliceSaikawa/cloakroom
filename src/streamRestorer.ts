@@ -14,9 +14,11 @@ export class StreamRestorer {
   private readonly textRestorer: TextDeltaRestorer
   private sseBuffer = ''
   private lastContentIndex = 0
+  private readonly scanFn: (text: string) => string
 
-  constructor(mappingTable: MappingTable) {
+  constructor(mappingTable: MappingTable, scanFn?: (text: string) => string) {
     this.textRestorer = new TextDeltaRestorer(mappingTable)
+    this.scanFn = scanFn ?? ((t) => t)
   }
 
   processChunk(chunk: Buffer | string): string {
@@ -97,13 +99,13 @@ export class StreamRestorer {
             (delta as Record<string, unknown>)['type'] === 'text_delta' &&
             typeof (delta as Record<string, unknown>)['text'] === 'string'
           ) {
-            const restored = this.textRestorer.process((delta as Record<string, string>)['text'])
+            const restored = this.scanFn(this.textRestorer.process((delta as Record<string, string>)['text']))
             ;(delta as Record<string, unknown>)['text'] = restored
           }
         }
 
         if (type === 'message_stop' || eventName === 'message_stop') {
-          const tail = this.textRestorer.flush()
+          const tail = this.scanFn(this.textRestorer.flush())
           if (tail) {
             output.push(
               `event: content_block_delta`,

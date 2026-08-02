@@ -139,11 +139,21 @@ export class PIIFilter {
   }
 
   createStreamRestorer(): StreamRestorer {
-    return new StreamRestorer(this.mappingTable)
+    const fpeEnabled = this.config.fpe?.enabled
+    const fpeKey = this.fpeKey
+    return new StreamRestorer(
+      this.mappingTable,
+      fpeEnabled ? (text) => scanAndRestoreFpe(text, fpeKey) : undefined,
+    )
   }
 
   createOpenAIStreamRestorer(): OpenAIStreamRestorer {
-    return new OpenAIStreamRestorer(this.mappingTable)
+    const fpeEnabled = this.config.fpe?.enabled
+    const fpeKey = this.fpeKey
+    return new OpenAIStreamRestorer(
+      this.mappingTable,
+      fpeEnabled ? (text) => scanAndRestoreFpe(text, fpeKey) : undefined,
+    )
   }
 
   async filterRequestBody(requestBody: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -244,7 +254,6 @@ export class PIIFilter {
       writeAuditLog(this.config.auditLog, {
         timestamp: new Date().toISOString(),
         category: match.category,
-        placeholder: match.text,
         confidence: match.confidence,
         position: { start: match.start, end: match.end },
         mode: this.config.mode,
@@ -269,7 +278,6 @@ export class PIIFilter {
       writeAuditLog(this.config.auditLog, {
         timestamp: new Date().toISOString(),
         category: match.category,
-        placeholder: match.text,
         confidence: match.confidence,
         position: { start: match.start, end: match.end },
         mode: this.config.mode,
