@@ -68,7 +68,7 @@ export function selectNonOverlappingMatches(matches: readonly PIIMatch[]): reado
   return winners.sort((left, right) => right.start - left.start)
 }
 
-function luhnCheck(digits: string): boolean {
+export function luhnCheck(digits: string): boolean {
   const nums = digits.replace(/\D/g, '')
   let sum = 0
   let alternate = false
@@ -99,7 +99,7 @@ function ibanCheck(input: string): boolean {
   return remainder === 1
 }
 
-function myNumberCheck(input: string): boolean {
+export function myNumberCheck(input: string): boolean {
   const digits = input.replace(/[-\s]/g, '').split('').map((digit) => Number.parseInt(digit, 10))
   if (digits.length !== 12 || digits.some((digit) => !Number.isInteger(digit))) return false
 

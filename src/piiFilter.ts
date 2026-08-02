@@ -1,9 +1,11 @@
 import { loadPIIConfig } from './config.js'
 import { getActiveCategories, isPassthroughEnabled } from './controlState.js'
 import { writeAuditLog } from './auditLog.js'
+import { encodeWithFpe, scanAndRestoreFpe } from './fpeCodec.js'
 import { incDetectionsByCategory, incRestoredPlaceholders } from './stats.js'
 import { createFakeValue } from './fakeData.js'
 import { detectHeuristicPII } from './heuristicNer.js'
+import { deriveKey, loadOrCreateKey } from './keys.js'
 import { MappingTable, toAlphabeticSequence } from './mappingTable.js'
 import { detectOllamaPII } from './ollamaFilter.js'
 import { OpenAIStreamRestorer } from './openaiStreamRestorer.js'
@@ -113,11 +115,13 @@ export class PIIFilter {
   private config: PIIFilterConfig
   private allowlist: ReadonlySet<string>
   private readonly blockedCategories: Set<PIICategory> = new Set()
+  private readonly fpeKey: Buffer
 
   constructor(config = loadPIIConfig(), mappingTable?: MappingTable) {
     this.config = config
     this.allowlist = new Set(config.allowlist)
     this.mappingTable = mappingTable ?? new MappingTable()
+    this.fpeKey = deriveKey(loadOrCreateKey(), 'cloakroom-fpe-v1')
   }
 
   getMappingTable(): MappingTable {
@@ -175,6 +179,10 @@ export class PIIFilter {
       const after = (restored.match(/\[[^\]\r\n]{1,256}\]/gu) ?? []).length
       const resolved = before - after
       if (resolved > 0) incRestoredPlaceholders(resolved)
+    }
+    // FPE restoration pass: scan for encoded digit tokens and decode them
+    if (this.config.fpe?.enabled) {
+      return scanAndRestoreFpe(restored, this.fpeKey)
     }
     return restored
   }
@@ -278,6 +286,27 @@ export class PIIFilter {
     // previously issued value instead of assigning it a second replacement.
     if (this.config.mode === 'fake' && this.mappingTable.resolve(match.text)) {
       return match.text
+    }
+
+    // FPE path: stateless reversible masking for numeric categories
+    const fpeCategories: readonly string[] = this.config.fpe?.categories ?? ['PHONE', 'CREDIT_CARD', 'MY_NUMBER']
+    if (this.config.fpe?.enabled && fpeCategories.includes(match.category)) {
+      const digits = match.text.replace(/\D/g, '')
+      if (digits.length >= 6) {
+        const { encoded, mac } = encodeWithFpe(match.category, digits, this.fpeKey)
+        const placeholder = encoded + mac
+        incDetectionsByCategory(match.category)
+        writeAuditLog(this.config.auditLog, {
+          timestamp: new Date().toISOString(),
+          category: match.category,
+          placeholder,
+          confidence: match.confidence,
+          position: { start: match.start, end: match.end },
+          mode: this.config.mode,
+          reviewRequired: match.confidence < this.config.auditLog.reviewThreshold,
+        })
+        return placeholder
+      }
     }
 
     const isReversible = this.config.mode !== 'anonymize'

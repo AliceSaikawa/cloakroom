@@ -2098,6 +2098,96 @@ async function testVaultPersistence() {
 }
 
 // ============================================================
+// FPE Integration Tests (#83)
+// ============================================================
+async function testFpeIntegration() {
+  console.log('\n=== FPE Integration (#83) ===')
+
+  const { piiFilter } = await loadActualModules()
+
+  const baseFpeConfig = {
+    enabled: true,
+    mode: 'pseudonymize',
+    maxRequestBodyBytes: 1024 * 1024,
+    categories: ['PHONE', 'CREDIT_CARD', 'MY_NUMBER'],
+    ollamaEndpoint: 'http://localhost:11434',
+    allowRemoteOllama: false,
+    ollamaModel: 'gemma3:4b',
+    ollamaEnabled: false,
+    heuristicNerEnabled: false,
+    customPatterns: [],
+    customCategories: [],
+    plugins: [],
+    dictionary: [],
+    allowlist: [],
+    auditLog: { enabled: false, destination: 'stderr', reviewThreshold: 0.8 },
+    categoryActions: {},
+    categoryOptions: {},
+    fpe: { enabled: true, categories: ['PHONE', 'CREDIT_CARD', 'MY_NUMBER'] },
+  }
+
+  // Test 1: PHONE マスク → 数字トークンに変換 → restoreText で元値復元
+  {
+    const phone = '09012345678'  // 11桁、ダッシュなし（ラウンドトリップ検証のため）
+    const filter = new piiFilter.PIIFilter(baseFpeConfig)
+    const result = await filter.filterRequestBody({
+      messages: [{ role: 'user', content: `電話番号は ${phone} です` }],
+    })
+    const masked = result.messages[0].content
+    assert.ok(!masked.includes(phone), '#83: FPE後に元の電話番号が残らない')
+    assert.ok(!masked.includes('[電話番号'), '#83: FPEモードではブラケットプレースホルダを使わない')
+
+    // トークンは13桁の数字列（11桁 + 2桁MAC）
+    const tokenMatch = masked.match(/(?<!\d)\d{13}(?!\d)/)
+    assert.ok(tokenMatch, `#83: FPEトークン(13桁)が出力に含まれる: "${masked}"`)
+    console.log(`  PHONE mask: "${masked}"`)
+
+    // restoreText で元値に戻る
+    const restored = filter.restoreText(masked)
+    assert.ok(restored.includes(phone), `#83: restoreText が元の電話番号を復元: got "${restored}"`)
+    console.log(`  PHONE restore: "${restored}"  OK`)
+  }
+
+  // Test 2: CREDIT_CARD マスク → 18桁トークン → Luhn不合格の可能性あり → restoreText で復元
+  {
+    const cc = '4532015112830366'  // Luhn合格のテストCC番号（16桁）
+    const filter = new piiFilter.PIIFilter(baseFpeConfig)
+    const result = await filter.filterRequestBody({
+      messages: [{ role: 'user', content: `カード番号: ${cc}` }],
+    })
+    const masked = result.messages[0].content
+    assert.ok(!masked.includes(cc), '#83: FPE後に元のCC番号が残らない')
+    assert.ok(!masked.includes('[クレジットカード'), '#83: FPEモードではブラケットプレースホルダを使わない')
+
+    // トークンは18桁の数字列（16桁 + 2桁MAC）
+    const tokenMatch = masked.match(/(?<!\d)\d{18}(?!\d)/)
+    assert.ok(tokenMatch, `#83: FPEトークン(18桁)が出力に含まれる: "${masked}"`)
+    console.log(`  CREDIT_CARD mask: "${masked}"`)
+
+    // restoreText で元値に戻る
+    const restored = filter.restoreText(masked)
+    assert.ok(restored.includes(cc), `#83: restoreText が元のCC番号を復元: got "${restored}"`)
+    console.log(`  CREDIT_CARD restore: "${restored}"  OK`)
+  }
+
+  // Test 3: FPE無効のフィルタは従来の[電話番号A]形式を使う
+  {
+    const phone = '09012345678'
+    const filter = new piiFilter.PIIFilter({ ...baseFpeConfig, fpe: { enabled: false } })
+    const result = await filter.filterRequestBody({
+      messages: [{ role: 'user', content: `電話番号は ${phone} です` }],
+    })
+    const masked = result.messages[0].content
+    assert.ok(masked.includes('[電話番号'), '#83: FPE無効時はブラケットプレースホルダを使う')
+    const restored = filter.restoreText(masked)
+    assert.ok(restored.includes(phone), '#83: FPE無効でも従来の復元が動作する')
+    console.log(`  FPE disabled fallback: OK`)
+  }
+
+  console.log('FPE Integration (#83) PASSED')
+}
+
+// ============================================================
 // Run
 // ============================================================
 const runProxy = process.argv.includes('--proxy')
@@ -2124,6 +2214,7 @@ try {
   await testContextPreservingPlaceholders()
   await testResponseDetection()
   await testVaultPersistence()
+  await testFpeIntegration()
 
   if (runProxy) {
     await testActualProxy()

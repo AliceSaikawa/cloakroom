@@ -10,22 +10,13 @@ import {
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { deriveKey, loadOrCreateKey } from './keys.js'
 import type { VaultData } from './types.js'
 
-const VAULT_DIR = join(homedir(), '.claude', 'cloakroom-vault')
-const KEY_PATH = join(homedir(), '.claude', 'cloakroom-key')
+// Re-export for backward compatibility.
+export { loadOrCreateKey } from './keys.js'
 
-// Load existing 32-byte key from disk, or generate and persist a new one.
-function loadOrCreateKey(): Buffer {
-  if (existsSync(KEY_PATH)) {
-    const key = readFileSync(KEY_PATH)
-    if (key.length === 32) return key
-  }
-  const key = randomBytes(32)
-  // 0o600: owner read/write only — no group/world access
-  writeFileSync(KEY_PATH, key, { mode: 0o600 })
-  return key
-}
+const VAULT_DIR = join(homedir(), '.claude', 'cloakroom-vault')
 
 function ensureVaultDir(): void {
   if (!existsSync(VAULT_DIR)) {
@@ -59,9 +50,13 @@ export function decryptData(ciphertext: Buffer, key: Buffer): string {
   return decipher.update(encrypted).toString('utf8') + decipher.final('utf8')
 }
 
+function vaultKey(): Buffer {
+  return deriveKey(loadOrCreateKey(), 'cloakroom-vault-v1')
+}
+
 export function saveSessionVault(sessionId: string, data: VaultData): void {
   ensureVaultDir()
-  const key = loadOrCreateKey()
+  const key = vaultKey()
   const json = JSON.stringify(data)
   const encrypted = encryptData(json, key)
   writeFileSync(vaultFilePath(sessionId), encrypted, { mode: 0o600 })
@@ -71,12 +66,12 @@ export function loadSessionVault(sessionId: string): VaultData | null {
   const filePath = vaultFilePath(sessionId)
   if (!existsSync(filePath)) return null
   try {
-    const key = loadOrCreateKey()
+    const key = vaultKey()
     const ciphertext = readFileSync(filePath)
     const json = decryptData(ciphertext, key)
     return JSON.parse(json) as VaultData
   } catch {
-    // Corrupt or tampered file — treat as absent
+    // Corrupt or tampered file (or encrypted with old key) — treat as absent
     return null
   }
 }

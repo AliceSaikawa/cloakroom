@@ -1,6 +1,8 @@
 import type { MappingTable } from './mappingTable.js'
 
 const MIN_PENDING_BUFFER = 32
+// Additional buffer headroom for FPE-encoded tokens (max CREDIT_CARD token = 18 chars, with margin)
+const FPE_MAX_ENCODED_LENGTH = 30
 
 export class TextDeltaRestorer {
   private pending = ''
@@ -8,8 +10,8 @@ export class TextDeltaRestorer {
   constructor(private readonly mappingTable: MappingTable) {}
 
   private getMaxPendingLength(): number {
-    // Keep enough buffered text to avoid splitting long custom placeholders.
-    return Math.max(MIN_PENDING_BUFFER, this.mappingTable.getLongestPlaceholderLength())
+    // Keep enough buffered text to avoid splitting long placeholders or FPE tokens.
+    return Math.max(MIN_PENDING_BUFFER, this.mappingTable.getLongestPlaceholderLength() + FPE_MAX_ENCODED_LENGTH)
   }
 
   process(text: string): string {

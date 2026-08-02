@@ -1,13 +1,24 @@
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { DEFAULT_CONFIG, type CategoryAction, type CategoryOption, type PIIFilterConfig, type ResponseDetectionConfig } from './types.js'
+import { DEFAULT_CONFIG, type CategoryAction, type CategoryOption, type FpeConfig, type PIIFilterConfig, type ResponseDetectionConfig } from './types.js'
 
 const CONFIG_PATH = join(homedir(), '.claude', 'pii-filter.json')
 
 let loadedConfig: PIIFilterConfig | null = null
 
 const VALID_CATEGORY_ACTIONS = new Set<string>(['mask', 'block', 'warn'])
+
+function parseFpeConfig(raw: unknown): FpeConfig {
+  const defaults = DEFAULT_CONFIG.fpe ?? { enabled: false }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return defaults
+  const obj = raw as Record<string, unknown>
+  const enabled = typeof obj['enabled'] === 'boolean' ? obj['enabled'] : defaults.enabled
+  const categories = Array.isArray(obj['categories'])
+    ? obj['categories'].filter((c): c is string => typeof c === 'string')
+    : undefined
+  return { enabled, ...(categories ? { categories } : {}) }
+}
 
 function parseResponseDetection(raw: unknown): ResponseDetectionConfig {
   const defaults = DEFAULT_CONFIG.responseDetection!
@@ -146,6 +157,7 @@ export function loadPIIConfig(): PIIFilterConfig {
         typeof parsed.vaultTtlMinutes === 'number' && parsed.vaultTtlMinutes > 0
           ? parsed.vaultTtlMinutes
           : DEFAULT_CONFIG.vaultTtlMinutes,
+      fpe: parseFpeConfig(parsed.fpe),
       auditLog: {
         enabled: Boolean(auditLog.enabled),
         destination: auditLog.destination === 'file' ? 'file' : 'stderr',
@@ -158,6 +170,12 @@ export function loadPIIConfig(): PIIFilterConfig {
     }
   } catch {
     loadedConfig = DEFAULT_CONFIG
+  }
+
+  if (loadedConfig.fpe?.enabled && loadedConfig.mode === 'anonymize') {
+    process.stderr.write(
+      'Warning: fpe.enabled has no effect in anonymize mode — responses are never restored.\n',
+    )
   }
 
   return loadedConfig

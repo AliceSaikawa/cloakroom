@@ -135,6 +135,11 @@ export type ResponseDetectionConfig = {
   readonly action: 'warn'
 }
 
+export type FpeConfig = {
+  readonly enabled: boolean
+  readonly categories?: readonly PIICategory[]
+}
+
 export type PIIFilterConfig = {
   readonly enabled: boolean
   readonly mode: PIIMode
@@ -157,6 +162,7 @@ export type PIIFilterConfig = {
   readonly providerOverrides?: Partial<Record<'anthropic' | 'openai', Partial<Pick<PIIFilterConfig, 'enabled' | 'categories' | 'categoryActions'>>>>
   readonly vaultEnabled?: boolean
   readonly vaultTtlMinutes?: number
+  readonly fpe?: FpeConfig
 }
 
 export const DEFAULT_CONFIG: PIIFilterConfig = {
@@ -206,4 +212,5 @@ export const DEFAULT_CONFIG: PIIFilterConfig = {
   providerOverrides: {},
   vaultEnabled: false,
   vaultTtlMinutes: 30,
+  fpe: { enabled: false },
 }
