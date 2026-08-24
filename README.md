@@ -218,3 +218,7 @@ Ollama無効時でもこの段によって主要な人名・組織名・学校�
 - `/v1/messages`、`/v1/messages/count_tokens`、`/v1/chat/completions` 以外のパスはPIIフィルタなしで透過プロキシされる
 - ソースファイル内のPIIがマスクされることで、コード生成の精度に影響が出る場合がある
 - プラグインはローカルモジュールを実行するため、信頼できるファイルだけを `plugins` に設定する。マルチモーダル対応の設計は [docs/multimodal-pii.md](docs/multimodal-pii.md) を参照
+
+## ライセンス
+
+MIT License. 詳細は [LICENSE](LICENSE) を参照。

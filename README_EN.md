@@ -218,3 +218,7 @@ Even with Ollama disabled, this stage provides reasonable automatic coverage of 
 - Paths other than `/v1/messages`, `/v1/messages/count_tokens`, and `/v1/chat/completions` are proxied without any PII filtering
 - Masking PII inside source code can affect code-generation accuracy
 - Plugins execute local modules, so only configure trusted files in `plugins`. See [docs/multimodal-pii.md](docs/multimodal-pii.md) for the multimodal PII design
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for details.
