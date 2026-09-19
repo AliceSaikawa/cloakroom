@@ -54,7 +54,7 @@ async function loadActualModules() {
     execFileSync(
       ESBUILD_BIN,
       [
-        join(SCRIPT_DIR, 'src', 'regexFilter.ts'),
+        join(SCRIPT_DIR, 'src', 'core', 'regexFilter.ts'),
         '--bundle',
         '--platform=node',
         '--format=esm',

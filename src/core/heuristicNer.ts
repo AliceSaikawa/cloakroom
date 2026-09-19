@@ -1,5 +1,5 @@
 // Zero-dependency heuristic NER for NAME/ORG/SCHOOL. Runs entirely on static
-// dictionaries and regular expressions (src/heuristicNerData.ts) so cloakroom can
+// dictionaries and regular expressions (src/core/heuristicNerData.ts) so cloakroom can
 // mask common Japanese proper nouns without Ollama or any other runtime dependency.
 import {
   GENERIC_SCHOOL_PREFIXES,

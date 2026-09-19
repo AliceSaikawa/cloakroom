@@ -1,4 +1,4 @@
-// Static data used by the built-in heuristic NER (src/heuristicNer.ts). No runtime
+// Static data used by the built-in heuristic NER (src/core/heuristicNer.ts). No runtime
 // dependencies, no network calls — this module only holds plain string arrays so it
 // can run without Ollama or any other external service.
 

@@ -197,10 +197,21 @@ When `heuristicNerEnabled: true` (the default), this stage runs after regex and 
 
 Even with Ollama disabled, this stage provides reasonable automatic coverage of common names, organizations, and schools, though it is not exhaustive — surnames outside the dictionary and unusual organization/school names can still be missed (see Limitations below).
 
+## Source layout
+
+- `src/server.ts`: Entry point that resolves the port and starts the server.
+- `src/server/`: HTTP handling, upstream forwarding, runtime controls, and session management. `app.ts` exposes `createProxyServer`; `runtime.ts` starts listening and installs signal handlers.
+- `src/api/messages/` and `src/api/completions/`: Anthropic Messages / OpenAI Chat Completions adapters and SSE restoration, selected by path through `src/api/index.ts`.
+- `src/api/responses/`: Documents the unimplemented OpenAI Responses API boundary. `/v1/responses` continues to pass through without PII filtering.
+- `src/core/`: PII detection, masking, restoration, and configuration, with no dependency on API adapters or the HTTP server.
+
+See the [architecture guide (Japanese)](docs/architecture.md) for the processing flow and individual module responsibilities.
+
 ## Tests
 
 | Command | What it checks | Requires |
 |---|---|---|
+| `node test-server.mjs` | HTTP handling, masking, forwarding, and restoration against a local mock upstream | No external API connection or API key |
 | `node test-pii-filter.mjs` | Filter ON/OFF, bug regressions, provider routing, stream restoration, runtime control, heuristic NER | None (bundles source on the fly with esbuild) |
 | `node test-pii-filter.mjs --proxy` | Same as above, plus a scenario that hits a running proxy for real | A running proxy and `ANTHROPIC_API_KEY` set |
 | `node test-integrated.mjs` | Accuracy of the full regex + Ollama detection pipeline | Only relevant when running with `ollamaEnabled: true`. **Ollama running locally** with `gemma3:4b` pulled |

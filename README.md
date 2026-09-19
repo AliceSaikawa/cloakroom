@@ -197,10 +197,21 @@ curl -X POST http://127.0.0.1:8787/control/disable/PHONE
 
 Ollama無効時でもこの段によって主要な人名・組織名・学校名がある程度自動検出されるが、完全ではなく、辞書外の姓や特殊な組織名/学校名は検出漏れが起こり得る(詳細は下記「制限事項」を参照)。
 
+## ソース構成
+
+- `src/server.ts`: ポートを解決してサーバを起動するエントリーポイント。
+- `src/server/`: HTTP 受付、上流への転送、実行時制御、セッション管理。`app.ts` の `createProxyServer` で組み立て、`runtime.ts` で待受とシグナル処理を開始する。
+- `src/api/messages/`・`src/api/completions/`: Anthropic Messages / OpenAI Chat Completions のアダプタと SSE 復元。`src/api/index.ts` がパスに応じて選択する。
+- `src/api/responses/`: OpenAI Responses API の未実装範囲を記載。`/v1/responses` は従来どおり PII フィルタなしで透過する。
+- `src/core/`: API や HTTP サーバに依存しない PII 検出、マスク、復元、設定。
+
+処理の流れと各ファイルの役割は [アーキテクチャガイド](docs/architecture.md) を参照。
+
 ## テスト
 
 | コマンド | 内容 | 前提 |
 |---|---|---|
+| `node test-server.mjs` | ローカルのモック上流を使い、HTTP 受付・マスク・転送・復元を検証 | 外部 API 接続・API キー不要 |
 | `node test-pii-filter.mjs` | フィルタON/OFF、バグ回帰、プロバイダ振り分け、ストリーム復元、実行時制御、ヒューリスティックNERのテスト一式 | なし(esbuildでソースを都度バンドルして検証) |
 | `node test-pii-filter.mjs --proxy` | 上記に加え、稼働中のプロキシへ実際にリクエストするシナリオも実行 | プロキシが起動済み、かつ `ANTHROPIC_API_KEY` 設定済み |
 | `node test-integrated.mjs` | 正規表現+Ollamaの一連の検出パイプラインの精度検証 | `ollamaEnabled: true` 運用時のみ実行。**Ollamaがローカルで稼働**(`gemma3:4b` pull済み) |

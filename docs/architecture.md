@@ -1,19 +1,22 @@
 # Cloakroom アーキテクチャ / コードリーディングガイド
 
-`src/` を初めて読む人向けの地図。基準コミット `c113d35`（src 全28ファイル・約4,320行）。
+`src/` を初めて読む人向けの地図。HTTP サーバ、API ごとの処理、PII のコアロジックを分けて配置している。
 
 ## 0. 読む順番
 
 コメントが少ないので、闇雲に開くと迷子になる。この順で追うと全体像が繋がる。
 
-| 順 | ファイル | 行数 | 何が分かるか |
-|---|---|---|---|
-| 1 | `server.ts` | 425 | HTTP の入口。全リクエストの分岐 |
-| 2 | `piiFilter.ts` | 534 | マスクと復元の司令塔 |
-| 3 | `regexFilter.ts` の `applyReplacements` / `selectNonOverlappingMatches` | — | 「検出結果をどう本文に適用するか」 |
-| 4 | `mappingTable.ts` | 135 | 番号札の発番と引き換え |
-| 5 | `streamRestorer.ts` + `textDeltaRestorer.ts` | 152 | SSE の途中で切れたプレースホルダの扱い |
-| 6 | `fpe.ts` / `fpeCodec.ts` | 181 | ステートレス可逆マスク |
+以下のパスは `src/` からの相対パス。
+
+| 順 | ファイル | 何が分かるか |
+|---|---|---|
+| 1 | `server.ts` → `server/runtime.ts` → `server/app.ts` | 起動と HTTP リクエストの分岐 |
+| 2 | `server/proxy.ts` → `api/index.ts` | 上流への転送と API ごとの処理の選択 |
+| 3 | `core/piiFilter.ts` | マスクと復元の司令塔 |
+| 4 | `core/regexFilter.ts` の `applyReplacements` / `selectNonOverlappingMatches` | 「検出結果をどう本文に適用するか」 |
+| 5 | `core/mappingTable.ts` | 番号札の発番と引き換え |
+| 6 | `api/messages/streamRestorer.ts` / `api/completions/streamRestorer.ts` + `core/textDeltaRestorer.ts` | SSE の途中で切れたプレースホルダの扱い |
+| 7 | `core/fpe.ts` / `core/fpeCodec.ts` | ステートレス可逆マスク |
 
 残りは周辺（設定・CLI・統計・監査ログ）なので、必要になってから読めばいい。
 
@@ -22,33 +25,35 @@
 ## 1. データフロー全体
 
 ```
-クライアント (Claude Code)
-   │  POST /v1/messages
+クライアント (Claude Code / OpenAI 互換クライアント)
+   │  POST /v1/messages または /v1/chat/completions
    ▼
-server.ts  createServer のハンドラ (365行目〜)
+server/app.ts  createProxyServer のハンドラ
    │
    ├─ /health                        → 即返す
-   ├─ /control/* , /metrics          → handleControlRequest
-   ├─ /analyze                       → handleAnalyze（検出のみ、マスクしない）
-   ├─ フィルタ対象パス               → handleMessages     ★本流
-   └─ それ以外                       → proxyPassThrough（無加工で上流へ）
+   ├─ /control/* , /metrics          → server/control.ts
+   ├─ /analyze                       → server/analyze.ts（検出のみ）
+   ├─ フィルタ対象パス               → server/proxy.ts → api/ のアダプタ
+   └─ それ以外                       → server/proxy.ts（無加工で上流へ）
 ```
 
-「フィルタ対象パス」は `provider.ts` の `filteredPaths` で決まる。
+「フィルタ対象パス」は各 API アダプタの `paths` が定義し、`api/index.ts` の `resolveApiAdapter(path)` が対応するアダプタを選ぶ。`server/provider.ts` も同じ定義を参照して上流を決める。
 現状は `/v1/messages`, `/v1/messages/count_tokens`, `/v1/chat/completions` の3つだけ。
 
-### handleMessages の中身（`server.ts:261`）
+`/v1/responses` の専用実装はまだ無い。`api/responses/README.md` はその境界を示すもので、このパスは従来どおり無加工で透過される。
+
+### フィルタ対象リクエストの処理（`server/proxy.ts`）
 
 ```
-1. readBody          リクエスト本文を読む（サイズ上限つき, requestBody.ts）
+1. readBody          リクエスト本文を読む（サイズ上限つき, server/requestBody.ts）
 2. JSON.parse
 3. sessionFilters.acquire(req)     → この会話用の PIIFilter を取得
-4. filter.filterRequestBody(body)  → ★マスク
+4. API アダプタから PIIFilter を呼ぶ → ★マスク
        └ BlockedByPolicyError が飛んだら 446 を返して終了
 5. 上流へ HTTPS リクエスト
 6. レスポンスを2通りに分岐
-       ├ SSE (stream:true)  → StreamRestorer でチャンクごとに復元
-       └ 非ストリーム       → 全部溜めてから restoreNonStreamingResponse
+       ├ SSE (stream:true)  → API ごとの StreamRestorer でチャンクごとに復元
+       └ 非ストリーム       → api/shared/responseRestorer.ts で復元
 7. クライアントへ返す
 ```
 
@@ -58,53 +63,76 @@ server.ts  createServer のハンドラ (365行目〜)
 
 ## 2. ファイル地図
 
+```
+src/
+├── server.ts              起動用エントリーポイント
+├── cli.ts                 CLI
+├── server/                HTTP 受付・転送・実行時制御
+├── api/
+│   ├── index.ts           パスからアダプタを選ぶレジストリ
+│   ├── types.ts           ApiAdapter インターフェース
+│   ├── messages/          Anthropic Messages API
+│   ├── completions/       OpenAI Chat Completions API
+│   ├── responses/         OpenAI Responses API の未実装範囲を明記
+│   └── shared/            API 間で共有する非ストリーム復元
+└── core/                  PII 検出・マスク・復元・設定
+```
+
+依存の向きは `server/ → api/ → core/`。サーバから設定や状態などのコア機能を直接参照する箇所もあるが、`core/` は `server/` や `api/` を参照しない。共有のリクエスト本文走査とストリーム復元用コンテキストは `PIIFilter` が提供し、SSE のプロトコル処理は各 API アダプタが担当する。
+
+`server/app.ts` の `createProxyServer` はサーバを組み立てるだけで、待受開始やシグナル登録を行わない。`server/runtime.ts` がそれらを担当し、`server.ts` はポートを解決して起動する薄い入口になっている。テストでは `createProxyServer` を使い、ローカルのモック上流と接続できる。
+
 ### 本流（読むべき）
 
 | ファイル | 役割 |
 |---|---|
-| `server.ts` | HTTP サーバ、ルーティング、上流へのプロキシ、シグナルハンドラ |
-| `piiFilter.ts` | `PIIFilter` クラス。検出段の呼び出し順、マスク、復元の再帰走査 |
-| `regexFilter.ts` | 正規表現パターン定義（514行の大半がこれ）、辞書検出、重なり解決、置換適用 |
-| `mappingTable.ts` | 元値 ⇄ プレースホルダ の双方向マップ、A/B/C…の採番 |
-| `streamRestorer.ts` | Anthropic SSE の復元 |
-| `openaiStreamRestorer.ts` | OpenAI SSE の復元（構造はほぼ同じ） |
-| `textDeltaRestorer.ts` | 上2つが共有する「分割されたプレースホルダ」のバッファリング |
+| `server.ts` / `server/runtime.ts` | ポートの解決、待受開始、シグナルハンドラ |
+| `server/app.ts` / `server/proxy.ts` | HTTP ルーティング、上流へのプロキシ |
+| `api/index.ts` / `api/types.ts` | API アダプタの選択と共通インターフェース |
+| `api/messages/index.ts` / `api/completions/index.ts` | API ごとのリクエスト処理とレスポンス復元の接続 |
+| `core/piiFilter.ts` | `PIIFilter` クラス。検出段の呼び出し順、マスク、共通の本文走査と復元コンテキスト |
+| `core/regexFilter.ts` | 正規表現パターン定義、辞書検出、重なり解決、置換適用 |
+| `core/mappingTable.ts` | 元値 ⇄ プレースホルダ の双方向マップ、A/B/C…の採番 |
+| `api/messages/streamRestorer.ts` | Anthropic SSE の復元 |
+| `api/completions/streamRestorer.ts` | OpenAI Chat Completions SSE の復元 |
+| `core/textDeltaRestorer.ts` | 上2つが共有する「分割されたプレースホルダ」のバッファリング |
 
 ### 検出段（プラグイン的な位置づけ）
 
 | ファイル | 役割 |
 |---|---|
-| `heuristicNer.ts` / `heuristicNerData.ts` | 姓辞書・敬称・法人格・学校名サフィックスによる NAME/ORG/SCHOOL 検出 |
-| `ollamaFilter.ts` | ローカル LLM への問い合わせ（既定 off） |
-| `pluginLoader.ts` | 外部 JS モジュールの `detect(text)` を呼ぶ |
+| `core/heuristicNer.ts` / `core/heuristicNerData.ts` | 姓辞書・敬称・法人格・学校名サフィックスによる NAME/ORG/SCHOOL 検出 |
+| `core/ollamaFilter.ts` | ローカル LLM への問い合わせ（既定 off） |
+| `core/pluginLoader.ts` | 外部 JS モジュールの `detect(text)` を呼ぶ |
 
 ### FPE（ステートレス可逆マスク）
 
 | ファイル | 役割 |
 |---|---|
-| `fpe.ts` | FF3-1 の生の実装。NIST SP 800-38G Rev.1 準拠 |
-| `fpeCodec.ts` | カテゴリごとの桁数定義、MAC 付与、復号ゲート、本文スキャン |
-| `keys.ts` | マスター鍵の生成・保存（`~/.claude/cloakroom-key`, 0600）と HKDF 派生 |
+| `core/fpe.ts` | FF3-1 の生の実装。NIST SP 800-38G Rev.1 準拠 |
+| `core/fpeCodec.ts` | カテゴリごとの桁数定義、MAC 付与、復号ゲート、本文スキャン |
+| `core/keys.ts` | マスター鍵の生成・保存（`~/.claude/cloakroom-key`, 0600）と HKDF 派生 |
 
 ### 周辺
 
 | ファイル | 役割 |
 |---|---|
-| `config.ts` | `~/.claude/pii-filter.json` の読み込みと正規化。プロセス内キャッシュあり |
+| `core/config.ts` | `~/.claude/pii-filter.json` の読み込みと正規化。プロセス内キャッシュあり |
 | `cli.ts` | `init` / `install` / `start` / `status` / `test` |
-| `types.ts` | 24種の組み込みカテゴリ定義と日本語ラベル |
-| `sessionFilterStore.ts` | セッションと `PIIFilter` の対応づけ |
-| `vault.ts` | マッピングのディスク保存（`vaultEnabled` 時のみ） |
-| `controlState.ts` / `controlCategory.ts` | passthrough とカテゴリ個別 on/off のプロセス内状態 |
-| `stats.ts` | `/metrics` 用のカウンタ |
-| `auditLog.ts` | `warn` アクションと `block` 時のログ出力 |
-| `requestBody.ts` | 本文読み取りとサイズ上限 |
-| `responseRestorer.ts` | 非ストリームレスポンスの復元入口 |
-| `httpUtils.ts` / `provider.ts` / `fakeData.ts` | ヘッダ読み取り / 上流振り分け / fake モードのダミー値 |
+| `core/types.ts` | 24種の組み込みカテゴリ定義と日本語ラベル |
+| `server/sessionFilterStore.ts` | セッションと `PIIFilter` の対応づけ |
+| `core/vault.ts` | マッピングのディスク保存（`vaultEnabled` 時のみ） |
+| `server/control.ts` / `server/analyze.ts` | 実行時制御・統計の HTTP API / 検出のみの HTTP API |
+| `core/controlState.ts` / `core/controlCategory.ts` | passthrough とカテゴリ個別 on/off のプロセス内状態 |
+| `core/stats.ts` | `/metrics` 用のカウンタ |
+| `core/auditLog.ts` | `warn` アクションと `block` 時のログ出力 |
+| `server/requestBody.ts` | 本文読み取りとサイズ上限 |
+| `api/shared/responseRestorer.ts` | 非ストリームレスポンスの復元入口 |
+| `server/httpUtils.ts` / `server/provider.ts` / `core/fakeData.ts` | ヘッダ読み取り / 上流振り分け / fake モードのダミー値 |
 
 ---
 
-## 3. 検出パイプライン（`piiFilter.ts:465` `filterText`）
+## 3. 検出パイプライン（`core/piiFilter.ts` の `filterText`）
 
 段は5つ。**それぞれが独立に「検出 → 置換」を完了させてから次に進む**。
 
@@ -125,13 +153,13 @@ server.ts  createServer のハンドラ (365行目〜)
 - **段をまたぐ重なりは「先勝ち」**（先の段が既に消しているので後の段は検出できない）
 - **同じ段の中の重なりは `selectNonOverlappingMatches` が解決**する
 
-`selectNonOverlappingMatches`（`regexFilter.ts:50`）の優先順位:
+`selectNonOverlappingMatches`（`core/regexFilter.ts`）の優先順位:
 
 1. 開始位置が早い方
 2. 同着なら confidence が高い方
 3. それも同着なら長い方
 
-### `applyReplacements` の仕掛け（`regexFilter.ts:554`）
+### `applyReplacements` の仕掛け（`core/regexFilter.ts`）
 
 置換は**後ろから前へ**行う。`selectNonOverlappingMatches` が最後に `start` の降順でソートして返すのはこのため。前から置換すると、置換のたびに後続のマッチの `start` / `end` がずれて壊れる。
 
@@ -141,13 +169,13 @@ server.ts  createServer のハンドラ (365行目〜)
 
 ## 4. プレースホルダの発番と復元
 
-### 発番（`mappingTable.ts:26` `register`）
+### 発番（`core/mappingTable.ts` の `register`）
 
 - 同じ元値には**同じプレースホルダ**を再利用する（`originalToPlaceholder` を先に引く）
 - 連番は `toAlphabeticSequence` で A → Z → AA（スプレッドシートの列と同じ）
 - **カウンタのキーはカテゴリ名ではなく表示ラベル**。カスタムカテゴリのラベルが組み込みと衝突しても、別々のプレースホルダになるようにするため
 
-### 復元（`mappingTable.ts:58` `replaceAllPlaceholders`）
+### 復元（`core/mappingTable.ts` の `replaceAllPlaceholders`）
 
 2パスある。
 
@@ -156,7 +184,7 @@ server.ts  createServer のハンドラ (365行目〜)
 
 ---
 
-## 5. ストリーム復元（`streamRestorer.ts` + `textDeltaRestorer.ts`）
+## 5. ストリーム復元（`api/*/streamRestorer.ts` + `core/textDeltaRestorer.ts`）
 
 SSE は任意の位置でチャンクが切れる。`[メールアド` / `レスA]` に分かれて届くことが普通にある。
 
@@ -200,7 +228,7 @@ TextDeltaRestorer.pending    閉じ括弧が来るまで溜める
 
 トークン = `FPE(元の数字)` + `2桁のMAC`
 
-### 復号の3ゲート（`fpeCodec.ts:92` `decodeWithFpe`）
+### 復号の3ゲート（`core/fpeCodec.ts` の `decodeWithFpe`）
 
 数字列を見つけるたびに復号を試すので、誤爆を防ぐ関門が3つある。
 
@@ -210,7 +238,7 @@ TextDeltaRestorer.pending    閉じ括弧が来るまで溜める
 
 3つ全部通ったものだけ置換する。
 
-### 対応カテゴリ（`fpeCodec.ts:21`）
+### 対応カテゴリ（`core/fpeCodec.ts`）
 
 | カテゴリ | トークン長 | 検証 |
 |---|---|---|
@@ -218,13 +246,13 @@ TextDeltaRestorer.pending    閉じ括弧が来るまで溜める
 | CREDIT_CARD | 18桁 | Luhn |
 | MY_NUMBER | 14桁 | マイナンバー検査数字 |
 
-`fpe.ts` は仕様書からの実装なのでコメントが厚い（34%）。ここは読めば分かるように書いてある。
+`core/fpe.ts` は仕様書からの実装で、ラウンドごとの処理をコメントで説明している。
 
 補足: FF3-1 のラウンド関数は AES の**逆暗号**を使うと仕様で決まっている。`createDecipheriv` を使っているのはそのため。バグではない。
 
 ---
 
-## 7. セッションの寿命（`sessionFilterStore.ts`）
+## 7. セッションの寿命（`server/sessionFilterStore.ts`）
 
 `PIIFilter` インスタンス（＝ `MappingTable`）を誰と紐付けるか。
 
@@ -238,7 +266,7 @@ TextDeltaRestorer.pending    閉じ括弧が来るまで溜める
 
 ---
 
-## 8. 設定の読み込み（`config.ts`）
+## 8. 設定の読み込み（`core/config.ts`）
 
 - パス: `~/.claude/pii-filter.json`
 - **プロセス内でキャッシュされる**（`loadedConfig`）。`reloadPIIConfig()` か `SIGHUP` か `POST /control/reload` を叩くまで再読み込みされない
@@ -253,16 +281,18 @@ TextDeltaRestorer.pending    閉じ括弧が来るまで溜める
 
 | 箇所 | 内容 | Issue |
 |---|---|---|
-| `streamRestorer.ts` | `text_delta` しか復元しない。ツール引数（`input_json_delta`）が復元されず `Edit` が壊れる | [#89](https://github.com/AliceSaikawa/cloakroom/issues/89) |
-| `provider.ts` | 上流ホストがハードコード | [#90](https://github.com/AliceSaikawa/cloakroom/issues/90) |
-| `server.ts:95` | `/control/*` に認証が無い | [#91](https://github.com/AliceSaikawa/cloakroom/issues/91) |
-| `sessionFilterStore.ts` | TTL / ソケット寿命への依存 | [#92](https://github.com/AliceSaikawa/cloakroom/issues/92) |
-| `provider.ts` | フィルタ対象外パスが無加工で透過（embeddings 等） | [#94](https://github.com/AliceSaikawa/cloakroom/issues/94) |
-| `regexFilter.ts` | loopback IP やテストカード番号もマスクしてしまう | [#97](https://github.com/AliceSaikawa/cloakroom/issues/97) |
+| `api/messages/streamRestorer.ts` | `text_delta` しか復元しない。ツール引数（`input_json_delta`）が復元されず `Edit` が壊れる | [#89](https://github.com/AliceSaikawa/cloakroom/issues/89) |
+| `server/provider.ts` | 既定の上流ホストがハードコード | [#90](https://github.com/AliceSaikawa/cloakroom/issues/90) |
+| `server/control.ts` | `/control/*` に認証が無い | [#91](https://github.com/AliceSaikawa/cloakroom/issues/91) |
+| `server/sessionFilterStore.ts` | TTL / ソケット寿命への依存 | [#92](https://github.com/AliceSaikawa/cloakroom/issues/92) |
+| `server/provider.ts` | フィルタ対象外パスが無加工で透過（embeddings、Responses API 等） | [#94](https://github.com/AliceSaikawa/cloakroom/issues/94) |
+| `core/regexFilter.ts` | loopback IP やテストカード番号もマスクしてしまう | [#97](https://github.com/AliceSaikawa/cloakroom/issues/97) |
 
-一方、**リクエスト側の `tool_use.input` は既にマスクされている**（`piiFilter.ts:430`）し、**非ストリームレスポンスの復元も効いている**（`restoreRecursive` が全文字列を走査する）。壊れているのは SSE 経路だけ。
+今回の責務分割で、これらの機能制約を解消したわけではない。
 
-`thinking` / `redacted_thinking` は往復とも意図的に触っていない（`piiFilter.ts:432`, `:520`）。署名が壊れるため。
+一方、**リクエスト側の `tool_use.input` は既にマスクされている**（`core/piiFilter.ts`）し、**非ストリームレスポンスの復元も効いている**（`restoreRecursive` が全文字列を走査する）。壊れているのは SSE 経路だけ。
+
+`thinking` / `redacted_thinking` は往復とも意図的に触っていない（`core/piiFilter.ts`）。署名が壊れるため。
 
 詳細は [`spec-review-2026-09.md`](spec-review-2026-09.md)。
 
@@ -287,3 +317,11 @@ curl -s -X POST localhost:8787/analyze \
 ```
 
 `/analyze` はマスクせず検出結果だけ返すので、正規表現やヒューリスティックの挙動を確認するのに一番速い。
+
+---
+
+## 11. 分割後の検証
+
+`node test-server.mjs` はローカルのモック上流を使い、HTTP 受付からマスク・転送・復元までを検証する。API キーや外部 API 接続は不要。
+
+既存の `node test-pii-filter.mjs`、`node test-fpe.mjs`、`node test-benchmark.mjs` はコア機能と API 復元処理の回帰確認に使う。`npm test` で HTTP テストを含めた4つをまとめて実行できる。ビルドと型検査は、それぞれ `npm run build` と `npm run typecheck` で行う。

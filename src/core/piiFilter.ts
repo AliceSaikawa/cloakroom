@@ -8,7 +8,6 @@ import { detectHeuristicPII } from './heuristicNer.js'
 import { deriveKey, loadOrCreateKey } from './keys.js'
 import { MappingTable, toAlphabeticSequence } from './mappingTable.js'
 import { detectOllamaPII } from './ollamaFilter.js'
-import { OpenAIStreamRestorer } from './openaiStreamRestorer.js'
 import { detectPluginPII, loadFilterPlugins } from './pluginLoader.js'
 import {
   applyReplacements,
@@ -16,7 +15,6 @@ import {
   detectRegexPII,
   selectNonOverlappingMatches,
 } from './regexFilter.js'
-import { StreamRestorer } from './streamRestorer.js'
 import {
   CATEGORY_LABELS,
   type CategoryOption,
@@ -138,22 +136,16 @@ export class PIIFilter {
     this.allowlist = new Set(config.allowlist)
   }
 
-  createStreamRestorer(): StreamRestorer {
+  getStreamRestorationContext(): {
+    readonly mappingTable: MappingTable
+    readonly restoreEncodedText?: (text: string) => string
+  } {
     const fpeEnabled = this.config.fpe?.enabled
     const fpeKey = this.fpeKey
-    return new StreamRestorer(
-      this.mappingTable,
-      fpeEnabled ? (text) => scanAndRestoreFpe(text, fpeKey) : undefined,
-    )
-  }
-
-  createOpenAIStreamRestorer(): OpenAIStreamRestorer {
-    const fpeEnabled = this.config.fpe?.enabled
-    const fpeKey = this.fpeKey
-    return new OpenAIStreamRestorer(
-      this.mappingTable,
-      fpeEnabled ? (text) => scanAndRestoreFpe(text, fpeKey) : undefined,
-    )
+    return {
+      mappingTable: this.mappingTable,
+      restoreEncodedText: fpeEnabled ? (text) => scanAndRestoreFpe(text, fpeKey) : undefined,
+    }
   }
 
   async filterRequestBody(requestBody: Record<string, unknown>): Promise<Record<string, unknown>> {

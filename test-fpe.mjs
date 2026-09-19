@@ -34,7 +34,7 @@ async function loadModules() {
       execFileSync(
         ESBUILD_BIN,
         [
-          join(SCRIPT_DIR, 'src', entry),
+          join(SCRIPT_DIR, 'src', 'core', entry),
           '--bundle',
           '--platform=node',
           '--format=esm',

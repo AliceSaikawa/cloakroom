@@ -3,8 +3,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { PIIFilter } from './piiFilter.js'
-import { DEFAULT_CONFIG } from './types.js'
+import { PIIFilter } from './core/piiFilter.js'
+import { DEFAULT_CONFIG } from './core/types.js'
 
 const DEFAULT_PROXY_URL = 'http://127.0.0.1:8787'
 const CLAUDE_DIR = join(homedir(), '.claude')
