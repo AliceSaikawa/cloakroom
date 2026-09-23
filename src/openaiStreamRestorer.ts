@@ -14,6 +14,9 @@ export class OpenAIStreamRestorer {
   private readonly textRestorer: TextDeltaRestorer
   private sseBuffer = ''
   private lastChoiceIndex = 0
+  private lastResponsesDeltaType: string | null = null
+  private lastResponseItemId: string | undefined
+  private lastResponseOutputIndex: number | undefined
   private readonly scanFn: (text: string) => string
 
   constructor(mappingTable: MappingTable, scanFn?: (text: string) => string) {
@@ -59,15 +62,26 @@ export class OpenAIStreamRestorer {
   private processEvent(rawEvent: string): string {
     const lines = rawEvent.split(/\r?\n/)
     const output: string[] = []
+    const eventHeader = lines.find((line) => line.startsWith('event:'))
+    const eventName = eventHeader?.slice(6).trim()
+    let eventHeaderWritten = false
+
+    const writeEventHeader = (): void => {
+      if (eventHeader && !eventHeaderWritten) {
+        output.push(eventHeader)
+        eventHeaderWritten = true
+      }
+    }
 
     for (const line of lines) {
       if (!line.startsWith('data:')) {
-        output.push(line)
+        if (!line.startsWith('event:')) output.push(line)
         continue
       }
 
       const payload = line.slice(5).trimStart()
       if (!payload) {
+        writeEventHeader()
         output.push(line)
         continue
       }
@@ -77,15 +91,33 @@ export class OpenAIStreamRestorer {
         // the client receives the fully restored text in order.
         const tail = this.scanFn(this.textRestorer.flush())
         if (tail) {
-          output.push(`data: ${JSON.stringify(this.createTailChunk(tail))}`)
+          this.writeSyntheticEvent(output, tail)
         }
+        writeEventHeader()
         output.push('data: [DONE]')
         continue
       }
 
       try {
         const parsed = JSON.parse(payload) as Record<string, unknown>
+        const eventType = typeof parsed['type'] === 'string' ? parsed['type'] : eventName
         const choices = parsed['choices']
+
+        if (
+          (eventType === 'response.output_text.delta' || eventType === 'response.function_call_arguments.delta') &&
+          typeof parsed['delta'] === 'string'
+        ) {
+          this.lastResponsesDeltaType = eventType
+          this.lastResponseItemId = typeof parsed['item_id'] === 'string' ? parsed['item_id'] : undefined
+          this.lastResponseOutputIndex =
+            typeof parsed['output_index'] === 'number' ? parsed['output_index'] : undefined
+          parsed['delta'] = this.scanFn(this.textRestorer.process(parsed['delta']))
+        }
+
+        if (eventType === 'response.completed' || eventType === 'response.failed') {
+          const tail = this.scanFn(this.textRestorer.flush())
+          if (tail) this.writeSyntheticEvent(output, tail)
+        }
 
         if (Array.isArray(choices)) {
           for (const choice of choices) {
@@ -105,16 +137,34 @@ export class OpenAIStreamRestorer {
           }
         }
 
+        writeEventHeader()
         output.push(`data: ${JSON.stringify(parsed)}`)
       } catch {
+        writeEventHeader()
         output.push(line)
       }
     }
 
+    if (eventHeader && !eventHeaderWritten) output.push(eventHeader)
+
     return output.join('\n')
   }
 
+  private writeSyntheticEvent(output: string[], text: string): void {
+    if (this.lastResponsesDeltaType) output.push(`event: ${this.lastResponsesDeltaType}`)
+    output.push(`data: ${JSON.stringify(this.createTailChunk(text))}`, '')
+  }
+
   private createTailChunk(text: string): Record<string, unknown> {
+    if (this.lastResponsesDeltaType) {
+      return {
+        type: this.lastResponsesDeltaType,
+        delta: text,
+        ...(this.lastResponseItemId ? { item_id: this.lastResponseItemId } : {}),
+        ...(this.lastResponseOutputIndex === undefined ? {} : { output_index: this.lastResponseOutputIndex }),
+      }
+    }
+
     return {
       choices: [
         {

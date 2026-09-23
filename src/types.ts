@@ -112,6 +112,7 @@ export type VaultData = {
 }
 
 export type PIIMode = 'pseudonymize' | 'anonymize' | 'fake'
+export type PlaceholderFormat = 'xml' | 'legacy'
 
 export type CategoryAction = 'mask' | 'block' | 'warn'
 
@@ -143,6 +144,9 @@ export type FpeConfig = {
 export type PIIFilterConfig = {
   readonly enabled: boolean
   readonly mode: PIIMode
+  readonly placeholderFormat: PlaceholderFormat
+  readonly placeholderInstructionEnabled: boolean
+  readonly blockNonText: boolean
   readonly maxRequestBodyBytes: number
   readonly categories: readonly PIICategory[]
   readonly ollamaEndpoint: string
@@ -168,6 +172,9 @@ export type PIIFilterConfig = {
 export const DEFAULT_CONFIG: PIIFilterConfig = {
   enabled: true,
   mode: 'pseudonymize',
+  placeholderFormat: 'xml',
+  placeholderInstructionEnabled: false,
+  blockNonText: false,
   maxRequestBodyBytes: 64 * 1024 * 1024,
   categories: [
     'EMAIL',

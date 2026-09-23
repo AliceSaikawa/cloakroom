@@ -1,7 +1,24 @@
-import type { PIICategory, VaultData } from './types.js'
+import type { PIICategory, PlaceholderFormat, VaultData } from './types.js'
 
 function escapeRegExp(input: string): string {
   return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function toCategorySlug(category: PIICategory): string {
+  const slug = String(category)
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/gu, '_')
+    .replace(/^_+|_+$/gu, '')
+  return slug || 'custom'
+}
+
+function escapeXmlAttribute(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;')
+}
+
+function createXmlPlaceholder(category: PIICategory, count: number, context?: string): string {
+  const contextAttribute = context === undefined ? '' : ` context="${escapeXmlAttribute(context)}"`
+  return `<pii:${toCategorySlug(category)} id="${count}"${contextAttribute}/>`
 }
 
 export function toAlphabeticSequence(count: number): string {
@@ -29,20 +46,23 @@ export class MappingTable {
     placeholderPrefix: string = String(category),
     reversible = true,
     createReplacement?: (count: number) => string,
+    format: PlaceholderFormat = 'xml',
+    context?: string,
   ): string {
     const existing = this.originalToPlaceholder.get(original)
     if (existing) return existing
 
-    // Key the counter by the visible prefix, not the category: two categories
-    // sharing a prefix (e.g. a custom label colliding with a built-in Japanese
-    // label) must still produce distinct placeholders, or restoration would
-    // silently return the wrong original value.
-    const count = (this.counters.get(placeholderPrefix) ?? 0) + 1
-    this.counters.set(placeholderPrefix, count)
+    // Legacy labels use their visible text; XML tokens use the sanitized category
+    // so categories that collapse to the same slug still get unique IDs.
+    const counterKey = format === 'legacy' ? placeholderPrefix : toCategorySlug(category)
+    const count = (this.counters.get(counterKey) ?? 0) + 1
+    this.counters.set(counterKey, count)
 
     const replacement = createReplacement
       ? createReplacement(count)
-      : `[${placeholderPrefix}${toAlphabeticSequence(count)}]`
+      : format === 'legacy'
+        ? `[${placeholderPrefix}${toAlphabeticSequence(count)}]`
+        : createXmlPlaceholder(category, count, context)
     this.originalToPlaceholder.set(original, replacement)
     if (reversible) {
       this.placeholderToOriginal.set(replacement, original)
@@ -53,6 +73,14 @@ export class MappingTable {
 
   resolve(placeholder: string): string | undefined {
     return this.placeholderToOriginal.get(placeholder) ?? this.resolveNormalized(placeholder)
+  }
+
+  hasMappings(): boolean {
+    return this.originalToPlaceholder.size > 0
+  }
+
+  hasReplacement(value: string): boolean {
+    return this.placeholderToOriginal.has(value)
   }
 
   replaceAllPlaceholders(input: string): string {
@@ -71,9 +99,10 @@ export class MappingTable {
 
     // A model may turn brackets full-width, add spaces, or use Japanese quotes.
     // Only replace candidates that normalize to a placeholder we actually issued.
-    return exactReplaced.replace(/(?:\[[^\]\r\n]{1,256}\]|［[^］\r\n]{1,256}］|「[^」\r\n]{1,256}」)/gu, (match) => {
-      return this.resolveNormalized(match) ?? match
-    })
+    return exactReplaced.replace(
+      /(?:\[[^\]\r\n]{1,256}\]|［[^］\r\n]{1,256}］|「[^」\r\n]{1,256}」|<pii:[^>\r\n]{1,256}\/?>)/giu,
+      (match) => this.resolveNormalized(match) ?? match,
+    )
   }
 
   getLongestPlaceholderLength(): number {
@@ -124,6 +153,16 @@ export class MappingTable {
 }
 
 function normalizePlaceholder(value: string): string {
+  if (value.toLowerCase().startsWith('<pii:')) {
+    const normalized = value.toLowerCase().replace(/\s+/gu, ' ').trim()
+    const match = normalized.match(
+      /^<pii:([a-z0-9_-]+)\s+id\s*=\s*["'](\d+)["'](?:\s+context\s*=\s*["']([^"']*)["'])?\s*\/>$/u,
+    )
+    if (!match) return value
+    const contextAttribute = match[3] === undefined ? '' : ` context="${match[3]}"`
+    return `<pii:${match[1]} id="${match[2]}"${contextAttribute}/>`
+  }
+
   let normalized = value
   if (normalized.startsWith('「') && normalized.endsWith('」')) {
     normalized = `[${normalized.slice(1, -1)}]`

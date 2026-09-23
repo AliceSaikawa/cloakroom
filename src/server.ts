@@ -11,9 +11,9 @@ import {
 } from './controlState.js'
 import { resolveConfiguredCategory } from './controlCategory.js'
 import { loadPIIConfig, reloadPIIConfig } from './config.js'
-import { BlockedByPolicyError, PIIFilter } from './piiFilter.js'
+import { BlockedByPolicyError, PIIFilter, UnsupportedContentError } from './piiFilter.js'
 import { resetPluginCache } from './pluginLoader.js'
-import { resolveProvider, shouldFilterMessagesPath } from './provider.js'
+import { getUpstreamPath, resolveProvider, shouldFilterMessagesPath } from './provider.js'
 import { RequestBodyTooLargeError, readRequestBody } from './requestBody.js'
 import { restoreNonStreamingResponse } from './responseRestorer.js'
 import { SessionFilterStore } from './sessionFilterStore.js'
@@ -222,6 +222,11 @@ function normalizeUpstreamHeaders(
 
   out['host'] = host
   delete out['accept-encoding']
+  delete out['x-provider']
+  delete out['x-pii-session-id']
+  delete out['x-pii-session-reset']
+  delete out['anthropic-session-id']
+  delete out['x-session-id']
   if (bodyLength !== undefined) {
     out['content-length'] = String(bodyLength)
   } else {
@@ -236,10 +241,11 @@ async function proxyPassThrough(req: IncomingMessage, res: ServerResponse): Prom
   const provider = resolveProvider(req)
   incPassthroughRequests(req.url?.split('?')[0] ?? '/')
   const headers = normalizeUpstreamHeaders(req.headers, provider.host, body.length)
+  const upstreamPath = getUpstreamPath(req)
 
   await new Promise<void>((resolve, reject) => {
     const upstream = httpsRequest(
-      `${provider.origin}${req.url ?? '/'}`,
+      `${provider.origin}${upstreamPath}`,
       {
         method: req.method,
         headers,
@@ -271,6 +277,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
   }
 
   const provider = resolveProvider(req)
+  const upstreamPath = getUpstreamPath(req)
 
   // Reuse the same filter within one logical session so placeholders can be restored
   // across multiple turns. If the caller does not provide a session ID, we fall back
@@ -291,6 +298,15 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
       })
       return
     }
+    if (err instanceof UnsupportedContentError) {
+      writeJson(res, 415, {
+        error: {
+          type: 'unsupported_content',
+          message: 'This request contains image, audio, video, or document content that cannot be inspected',
+        },
+      })
+      return
+    }
     throw err
   }
 
@@ -300,7 +316,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
 
   await new Promise<void>((resolve, reject) => {
     const upstream = httpsRequest(
-      `${provider.origin}${req.url ?? '/v1/messages'}`,
+      `${provider.origin}${upstreamPath || '/v1/messages'}`,
       {
         method: 'POST',
         headers,

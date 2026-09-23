@@ -1290,7 +1290,7 @@ async function testMaskingQualityAndSecrets() {
     const filtered = await filter.filterRequestBody({ messages: [{ role: 'user', content: input }] })
     const content = filtered.messages[0].content
     assert.ok(content.includes('person1@example.com'), '#73: fake mode should use a reserved email domain')
-    assert.ok(content.includes('090-0000-0001'), '#73: fake mode should use a plausible phone number')
+    assert.ok(content.includes('000-0000-0001'), '#73: fake mode should use an obviously invalid phone number')
     assert.equal(filter.restoreText(content), input, '#73: fake values should remain reversible')
 
     const repeated = await filter.filterRequestBody({

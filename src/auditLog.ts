@@ -8,7 +8,7 @@ const DEFAULT_AUDIT_LOG_PATH = join(homedir(), '.claude', 'pii-audit.jsonl')
 export type AuditLogEvent = {
   readonly timestamp: string
   readonly category: PIICategory
-  readonly placeholder: string
+  readonly placeholder?: string
   readonly confidence: number
   readonly position: {
     readonly start: number
@@ -25,8 +25,8 @@ export function writeAuditLog(config: AuditLogConfig, event: AuditLogEvent): voi
   const line = `${JSON.stringify(event)}\n`
   if (config.destination === 'file') {
     const path = config.path ?? DEFAULT_AUDIT_LOG_PATH
-    mkdirSync(dirname(path), { recursive: true })
-    appendFileSync(path, line, 'utf8')
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+    appendFileSync(path, line, { encoding: 'utf8', mode: 0o600 })
     return
   }
 
