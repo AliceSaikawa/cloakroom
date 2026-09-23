@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -9,7 +9,8 @@ import { DEFAULT_CONFIG } from './types.js'
 const DEFAULT_PROXY_URL = 'http://127.0.0.1:8787'
 const CLAUDE_DIR = join(homedir(), '.claude')
 const CONFIG_PATH = join(CLAUDE_DIR, 'pii-filter.json')
-const CLAUDE_ENV_PATH = join(CLAUDE_DIR, '.env')
+const CLAUDE_SETTINGS_PATH = join(CLAUDE_DIR, 'settings.json')
+const CLAUDE_SETTINGS_BACKUP_PATH = join(CLAUDE_DIR, 'cloakroom-settings-backup.json')
 const HERMES_ENV_PATH = join(homedir(), '.hermes', '.env')
 
 type CommandContext = {
@@ -23,14 +24,18 @@ Usage:
   cloakroom start
   cloakroom init [--force]
   cloakroom install --for=claude-code|hermes-agent
+  cloakroom uninstall --for=claude-code
   cloakroom status
+  cloakroom doctor
   cloakroom test
 
 Commands:
   start      Start the local PII proxy
   init       Create ~/.claude/pii-filter.json
   install    Write proxy environment settings for Claude Code or Hermes Agent
+  uninstall  Restore Claude Code settings saved by install
   status     Show proxy health and runtime filter status
+  doctor     Check Claude Code settings and proxy health
   test       Run a local sample through the filter
 `)
 }
@@ -86,12 +91,7 @@ function installProxyEnvironment(ctx: CommandContext): void {
   const proxyUrl = process.env['PII_PROXY_URL'] ?? DEFAULT_PROXY_URL
 
   if (target === 'claude-code') {
-    ensureClaudeDir()
-    const existing = existsSync(CLAUDE_ENV_PATH) ? readFileSync(CLAUDE_ENV_PATH, 'utf8') : ''
-    let updated = upsertEnvLine(existing, 'ANTHROPIC_BASE_URL', proxyUrl)
-    updated = upsertEnvLine(updated, 'OPENAI_BASE_URL', `${proxyUrl}/v1`)
-    writeFileSync(CLAUDE_ENV_PATH, updated)
-    process.stdout.write(`Updated Claude Code env: ${CLAUDE_ENV_PATH}\n`)
+    installClaudeCodeSettings(proxyUrl)
   } else if (target === 'hermes-agent') {
     mkdirSync(dirname(HERMES_ENV_PATH), { recursive: true })
     const existing = existsSync(HERMES_ENV_PATH) ? readFileSync(HERMES_ENV_PATH, 'utf8') : ''
@@ -102,6 +102,133 @@ function installProxyEnvironment(ctx: CommandContext): void {
   }
 
   process.stdout.write(`Proxy URL: ${proxyUrl}\n`)
+}
+
+type SavedEnvironmentValue = { readonly existed: boolean; readonly value?: unknown }
+type ClaudeSettingsBackup = {
+  readonly version: 1
+  readonly hadEnv: boolean
+  readonly original: Record<string, SavedEnvironmentValue>
+  readonly installed: Record<string, string>
+}
+
+function readJsonObject(path: string): Record<string, unknown> {
+  if (!existsSync(path)) return {}
+  const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`Expected a JSON object in ${path}`)
+  }
+  return parsed as Record<string, unknown>
+}
+
+function writeJsonAtomically(path: string, value: unknown): void {
+  const temporaryPath = `${path}.${process.pid}.tmp`
+  writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
+  renameSync(temporaryPath, path)
+}
+
+function getClaudeProxySettings(proxyUrl: string): Record<string, string> {
+  const baseUrl = proxyUrl.replace(/\/+$/u, '')
+  return {
+    ANTHROPIC_BASE_URL: baseUrl,
+    OPENAI_BASE_URL: `${baseUrl}/v1`,
+  }
+}
+
+function installClaudeCodeSettings(proxyUrl: string): void {
+  ensureClaudeDir()
+  const settings = readJsonObject(CLAUDE_SETTINGS_PATH)
+  const existingEnv = settings['env']
+  if (existingEnv !== undefined && (!existingEnv || typeof existingEnv !== 'object' || Array.isArray(existingEnv))) {
+    throw new Error(`Expected "env" to be an object in ${CLAUDE_SETTINGS_PATH}`)
+  }
+
+  const env = { ...((existingEnv ?? {}) as Record<string, unknown>) }
+  const installed = getClaudeProxySettings(proxyUrl)
+  let backup: ClaudeSettingsBackup
+  if (existsSync(CLAUDE_SETTINGS_BACKUP_PATH)) {
+    const parsed = readJsonObject(CLAUDE_SETTINGS_BACKUP_PATH) as unknown as ClaudeSettingsBackup
+    if (parsed.version !== 1 || !parsed.original) {
+      throw new Error(`Invalid Cloakroom settings backup: ${CLAUDE_SETTINGS_BACKUP_PATH}`)
+    }
+    backup = { ...parsed, installed }
+  } else {
+    const original: Record<string, SavedEnvironmentValue> = {}
+    for (const key of Object.keys(installed)) {
+      original[key] = Object.hasOwn(env, key)
+        ? { existed: true, value: env[key] }
+        : { existed: false }
+    }
+    backup = {
+      version: 1,
+      hadEnv: existingEnv !== undefined,
+      original,
+      installed,
+    }
+  }
+
+  writeJsonAtomically(CLAUDE_SETTINGS_BACKUP_PATH, backup)
+  writeJsonAtomically(CLAUDE_SETTINGS_PATH, { ...settings, env: { ...env, ...installed } })
+  process.stdout.write(`Updated Claude Code settings: ${CLAUDE_SETTINGS_PATH}\n`)
+}
+
+function uninstallClaudeCodeSettings(): void {
+  if (!existsSync(CLAUDE_SETTINGS_BACKUP_PATH)) {
+    process.stdout.write('Cloakroom settings backup not found; nothing to restore.\n')
+    return
+  }
+
+  const backup = readJsonObject(CLAUDE_SETTINGS_BACKUP_PATH) as unknown as ClaudeSettingsBackup
+  const settings = readJsonObject(CLAUDE_SETTINGS_PATH)
+  const existingEnv = settings['env']
+  if (existingEnv !== undefined && (!existingEnv || typeof existingEnv !== 'object' || Array.isArray(existingEnv))) {
+    throw new Error(`Expected "env" to be an object in ${CLAUDE_SETTINGS_PATH}`)
+  }
+
+  const env = { ...((existingEnv ?? {}) as Record<string, unknown>) }
+  const preserved: string[] = []
+  for (const [key, original] of Object.entries(backup.original)) {
+    if (env[key] !== backup.installed[key]) {
+      preserved.push(key)
+      continue
+    }
+    if (original.existed) env[key] = original.value
+    else delete env[key]
+  }
+
+  const nextSettings = { ...settings }
+  if (!backup.hadEnv && Object.keys(env).length === 0) delete nextSettings['env']
+  else nextSettings['env'] = env
+  writeJsonAtomically(CLAUDE_SETTINGS_PATH, nextSettings)
+  unlinkSync(CLAUDE_SETTINGS_BACKUP_PATH)
+  process.stdout.write(`Restored Claude Code settings: ${CLAUDE_SETTINGS_PATH}\n`)
+  if (preserved.length > 0) {
+    process.stdout.write(`Kept values changed after install: ${preserved.join(', ')}\n`)
+  }
+}
+
+async function runDoctor(): Promise<void> {
+  const proxyUrl = (process.env['PII_PROXY_URL'] ?? DEFAULT_PROXY_URL).replace(/\/+$/u, '')
+  const expected = getClaudeProxySettings(proxyUrl)
+  let settingsOkay = false
+  try {
+    const settings = readJsonObject(CLAUDE_SETTINGS_PATH)
+    const env = settings['env'] as Record<string, unknown> | undefined
+    settingsOkay = Object.entries(expected).every(([key, value]) => env?.[key] === value)
+  } catch {
+    settingsOkay = false
+  }
+
+  let proxyOkay = false
+  try {
+    const response = await fetch(`${proxyUrl}/health`, { signal: AbortSignal.timeout(3000) })
+    proxyOkay = response.ok && (await response.json()).status === 'ok'
+  } catch {
+    proxyOkay = false
+  }
+
+  process.stdout.write(`${JSON.stringify({ settingsOkay, proxyOkay, proxyUrl }, null, 2)}\n`)
+  if (!settingsOkay || !proxyOkay) process.exitCode = 1
 }
 
 async function printStatus(): Promise<void> {
@@ -188,8 +315,20 @@ async function main(): Promise<void> {
     return
   }
 
+  if (command === 'uninstall') {
+    const target = getOption(args, '--for')
+    if (target !== 'claude-code') throw new Error('uninstall supports --for=claude-code')
+    uninstallClaudeCodeSettings()
+    return
+  }
+
   if (command === 'status') {
     await printStatus()
+    return
+  }
+
+  if (command === 'doctor') {
+    await runDoctor()
     return
   }
 

@@ -34,8 +34,20 @@ export class SessionFilterStore {
   acquire(req: IncomingMessage): PIIFilter {
     this.pruneExpiredSessions()
 
+    // Rebuild mappings from the full conversation in each request by default.
+    // This avoids binding restoration to a TCP connection or client session ID.
+    if (!this.config?.statefulSessionMappings) {
+      const providerOverride = this.config?.providerOverrides?.[resolveProvider(req, this.config?.upstreams).kind]
+      const mergedConfig = this.config && providerOverride
+        ? { ...this.config, ...providerOverride }
+        : this.config
+      return new PIIFilter(mergedConfig)
+    }
+
     // Apply provider-specific overrides when configured
-    const providerOverride = this.config?.providerOverrides?.[resolveProvider(req).kind]
+    const providerOverride = this.config?.providerOverrides?.[
+      resolveProvider(req, this.config?.upstreams).kind
+    ]
     if (providerOverride && this.config) {
       const mergedConfig: PIIFilterConfig = { ...this.config, ...providerOverride }
       return new PIIFilter(mergedConfig)

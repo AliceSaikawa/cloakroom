@@ -1,3 +1,4 @@
+import { isIP } from 'node:net'
 import type { CustomPatternEntry, DictionaryEntry, PIICategory, PIIMatch } from './types.js'
 
 type ContextEnhancer = {
@@ -15,6 +16,47 @@ type PatternDef = {
   readonly captureGroup?: number
   readonly contextEnhancer?: ContextEnhancer
   readonly baseConfidence?: number
+  readonly minimumConfidence?: number
+  readonly defaultAction?: 'mask' | 'block' | 'warn'
+}
+
+type NormalizedSearchText = {
+  readonly text: string
+  readonly sourceStarts: readonly number[]
+  readonly sourceEnds: readonly number[]
+}
+
+function buildNormalizedSearchText(text: string): NormalizedSearchText {
+  let normalized = ''
+  const sourceStarts: number[] = []
+  const sourceEnds: number[] = []
+
+  for (let sourceStart = 0; sourceStart < text.length;) {
+    const codePoint = text.codePointAt(sourceStart) ?? 0
+    const originalCharacter = String.fromCodePoint(codePoint)
+    const sourceEnd = sourceStart + originalCharacter.length
+    const normalizedCharacter = originalCharacter.normalize('NFKC')
+    normalized += normalizedCharacter
+    for (let index = 0; index < normalizedCharacter.length; index++) {
+      sourceStarts.push(sourceStart)
+      sourceEnds.push(sourceEnd)
+    }
+    sourceStart = sourceEnd
+  }
+
+  return { text: normalized, sourceStarts, sourceEnds }
+}
+
+function mapNormalizedRange(
+  search: NormalizedSearchText,
+  start: number,
+  end: number,
+  sourceLength: number,
+): { readonly start: number; readonly end: number } {
+  return {
+    start: search.sourceStarts[start] ?? sourceLength,
+    end: end > start ? search.sourceEnds[end - 1] ?? sourceLength : sourceLength,
+  }
 }
 
 function applyContextEnhancer(
@@ -139,6 +181,112 @@ function highEntropySecretCheck(input: string): boolean {
   return input.length >= 20 && shannonEntropy(input) >= 3.5
 }
 
+function creditCardCheck(input: string): boolean {
+  const digits = input.replace(/\D/gu, '')
+  return !TEST_CARD_NUMBERS.has(digits) && luhnCheck(digits)
+}
+
+const TEST_CARD_NUMBERS = new Set([
+  '4242424242424242',
+  '4000000000000002',
+  '4000000000009995',
+  '4000000000003220',
+  '5555555555554444',
+  '2223003122003222',
+])
+
+const NON_PERSONAL_HOME_ACCOUNTS = new Set([
+  'shared',
+  'public',
+  'default',
+  'administrator',
+  'admin',
+  'user',
+  'runner',
+  'root',
+])
+
+function parseIPv4(input: string): readonly number[] | undefined {
+  const parts = input.split('.').map((part) => Number.parseInt(part, 10))
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return undefined
+  }
+  return parts
+}
+
+function isPublicIPv4(input: string): boolean {
+  if (isIP(input) !== 4) return false
+  const octets = parseIPv4(input)
+  if (!octets) return false
+  const [first = 0, second = 0, third = 0] = octets
+
+  return !(
+    first === 0 ||
+    first === 10 ||
+    first === 127 ||
+    (first === 100 && second >= 64 && second <= 127) ||
+    (first === 169 && second === 254) ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 0 && (third === 0 || third === 2)) ||
+    (first === 192 && second === 88 && third === 99) ||
+    (first === 192 && second === 168) ||
+    (first === 198 && (second === 18 || second === 19)) ||
+    (first === 198 && second === 51 && third === 100) ||
+    (first === 203 && second === 0 && third === 113) ||
+    first >= 224
+  )
+}
+
+function parseIPv6(input: string): bigint | undefined {
+  if (isIP(input) !== 6) return undefined
+
+  const halves = input.toLowerCase().split('::')
+  if (halves.length > 2) return undefined
+  const left = halves[0] ? halves[0].split(':') : []
+  const right = halves.length === 2 && halves[1] ? halves[1].split(':') : []
+  const missingGroups = 8 - left.length - right.length
+  if ((halves.length === 1 && missingGroups !== 0) || (halves.length === 2 && missingGroups < 1)) {
+    return undefined
+  }
+
+  const groups = [...left, ...Array.from({ length: missingGroups }, () => '0'), ...right]
+  if (groups.length !== 8 || groups.some((group) => !/^[0-9a-f]{1,4}$/u.test(group))) return undefined
+  return groups.reduce((value, group) => (value << 16n) | BigInt(`0x${group}`), 0n)
+}
+
+function isInIPv6Prefix(address: bigint, prefix: string, prefixLength: number): boolean {
+  const prefixAddress = parseIPv6(prefix)
+  if (prefixAddress === undefined) return false
+  const shift = BigInt(128 - prefixLength)
+  return address >> shift === prefixAddress >> shift
+}
+
+function isPublicIPv6(input: string): boolean {
+  const address = parseIPv6(input)
+  if (address === undefined) return false
+
+  // Only global-unicast space is eligible; exclude protocol, benchmark,
+  // documentation, and transition ranges within it as well.
+  if (!isInIPv6Prefix(address, '2000::', 3)) return false
+  const reservedPrefixes: readonly (readonly [string, number])[] = [
+    ['2001::', 23],
+    ['2001:2::', 48],
+    ['2001:10::', 28],
+    ['2001:20::', 28],
+    ['2001:db8::', 32],
+    ['2002::', 16],
+  ]
+  return !reservedPrefixes.some(([prefix, length]) => isInIPv6Prefix(address, prefix, length))
+}
+
+function isHomeAccount(input: string): boolean {
+  return !NON_PERSONAL_HOME_ACCOUNTS.has(input.toLowerCase())
+}
+
+function macAddressCheck(input: string): boolean {
+  return /^(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}$/iu.test(input)
+}
+
 function withIndices(regex: RegExp): RegExp {
   return regex.flags.includes('d') ? new RegExp(regex.source, regex.flags) : new RegExp(regex.source, `${regex.flags}d`)
 }
@@ -226,7 +374,7 @@ const PATTERNS: readonly PatternDef[] = [
   {
     category: 'CREDIT_CARD',
     pattern: /\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b/g,
-    validate: luhnCheck,
+    validate: creditCardCheck,
   },
   {
     category: 'MY_NUMBER',
@@ -257,9 +405,10 @@ const PATTERNS: readonly PatternDef[] = [
     category: 'PHONE',
     pattern: /(?:\+81[-\s]?|0)\d{1,4}[-\s]?\d{1,4}[-\s]?\d{3,4}\b/g,
     validate: (match: string) => match.replace(/[-\s]/g, '').length >= 10,
-    baseConfidence: 0.8,
+    baseConfidence: 0.5,
+    minimumConfidence: 0.7,
     contextEnhancer: {
-      boostWords: ['電話', 'TEL', 'tel', '連絡先', 'Phone', 'phone'],
+      boostWords: ['電話', '電話番号', '携帯電話', 'TEL', 'tel', 'PHONE', '連絡先', 'Phone', 'phone'],
       suppressWords: ['サンプル', '例', 'test', 'example', 'dummy', 'xxx'],
       boostAmount: 0.2,
       suppressAmount: 0.3,
@@ -269,9 +418,10 @@ const PATTERNS: readonly PatternDef[] = [
   {
     category: 'PHONE',
     pattern: /\+\d{1,3}[-\s]\d{1,14}(?:[-\s]\d{1,14}){0,4}\b/g,
-    baseConfidence: 0.8,
+    baseConfidence: 0.5,
+    minimumConfidence: 0.7,
     contextEnhancer: {
-      boostWords: ['電話', 'TEL', 'tel', '連絡先', 'Phone', 'phone'],
+      boostWords: ['電話', '電話番号', '携帯電話', 'TEL', 'tel', 'PHONE', '連絡先', 'Phone', 'phone'],
       suppressWords: ['サンプル', '例', 'test', 'example', 'dummy', 'xxx'],
       boostAmount: 0.2,
       suppressAmount: 0.3,
@@ -301,6 +451,7 @@ const PATTERNS: readonly PatternDef[] = [
     category: 'NAME',
     pattern: /(?:Author|Committer):\s+(.+?)\s+<[^>]+>/g,
     captureGroup: 1,
+    defaultAction: 'warn',
   },
   {
     category: 'SSN',
@@ -310,11 +461,17 @@ const PATTERNS: readonly PatternDef[] = [
     category: 'IP_ADDRESS',
     pattern:
       /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b/g,
+    validate: isPublicIPv4,
   },
   {
     category: 'IP_ADDRESS',
-    pattern:
-      /\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b/g,
+    pattern: /(?<![0-9a-fA-F:])(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}(?![0-9a-fA-F:])/g,
+    validate: isPublicIPv6,
+  },
+  {
+    category: 'IP_ADDRESS',
+    pattern: /(?<![0-9a-fA-F:])(?:[0-9a-fA-F]{1,4}:){0,7}:(?:[0-9a-fA-F]{1,4}:?){0,7}(?![0-9a-fA-F:])/g,
+    validate: isPublicIPv6,
   },
   {
     category: 'POSTAL_CODE',
@@ -322,8 +479,8 @@ const PATTERNS: readonly PatternDef[] = [
   },
   {
     category: 'POSTAL_CODE',
-    pattern: /\b\d{3}-\d{4}(?=\s*(?:$|[^\d]))/g,
-    validate: (match: string) => !/^\d{3}-\d{2}-\d{4}$/.test(match),
+    pattern: /(?:郵便番号|ZIP(?:\s*code)?)[:：\s]+(\d{3}-\d{4})/gi,
+    captureGroup: 1,
   },
   {
     category: 'IBAN',
@@ -409,8 +566,47 @@ const PATTERNS: readonly PatternDef[] = [
   },
   {
     category: 'PASSWORD',
-    pattern: /(?:password|passwd|pwd)\s*[:=]\s*(\S{4,128})/gi,
+    pattern: /(?:password|passwd|pwd|pass)\s*[:=]\s*["']?([^\s"',;]{4,128})/gi,
     captureGroup: 1,
+  },
+  {
+    category: 'CREDENTIAL_PAIR',
+    pattern: /Authorization\s*:\s*Basic\s+([A-Za-z0-9+/]{8,}={0,2})/gi,
+    captureGroup: 1,
+  },
+  {
+    category: 'CREDENTIAL_PAIR',
+    pattern: /(?:cookie|set-cookie|session[_-]?id)\s*[:=]\s*([^;\s,]{8,128})/gi,
+    captureGroup: 1,
+  },
+  {
+    category: 'HOME_PATH',
+    pattern: /(?:\/Users\/|\/home\/)([^/\\\s"'<>]+)/g,
+    captureGroup: 1,
+    validate: isHomeAccount,
+  },
+  {
+    category: 'HOME_PATH',
+    pattern: /[A-Za-z]:\\Users\\([^\\/\s"'<>]+)/gi,
+    captureGroup: 1,
+    validate: isHomeAccount,
+  },
+  {
+    category: 'MAC_ADDRESS',
+    pattern: /(?:MAC(?: address)?|BSSID)[:=\s]+((?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2})/gi,
+    captureGroup: 1,
+    validate: macAddressCheck,
+  },
+  {
+    category: 'DEVICE_ID',
+    pattern: /(?:MEID|device[_ -]?id|端末識別子)[:：\s]+([A-F0-9-]{8,32})/gi,
+    captureGroup: 1,
+  },
+  {
+    category: 'DEVICE_ID',
+    pattern: /(?:IMEI|International Mobile Equipment Identity)[:：\s]+(\d{15})/gi,
+    captureGroup: 1,
+    validate: luhnCheck,
   },
 ]
 
@@ -465,26 +661,29 @@ export function detectRegexPII(
 ): readonly PIIMatch[] {
   const categorySet = new Set(enabledCategories)
   const matches: PIIMatch[] = []
+  const searchable = buildNormalizedSearchText(text)
 
   for (const def of PATTERNS) {
     if (!categorySet.has(def.category)) continue
 
     const regex = withIndices(def.pattern)
     let m: RegExpExecArray | null
-    while ((m = regex.exec(text)) !== null) {
+    while ((m = regex.exec(searchable.text)) !== null) {
       const group = def.captureGroup ?? 0
-      const matchText = m[group] ?? m[0]
-      if (!matchText) continue
-      if (def.validate && !def.validate(matchText)) continue
-
+      const normalizedText = m[group] ?? m[0]
+      if (!normalizedText) continue
       const groupIndex = m.indices?.[group]
-      const start = groupIndex?.[0] ?? m.index
-      const end = groupIndex?.[1] ?? start + matchText.length
+      const normalizedStart = groupIndex?.[0] ?? m.index
+      const normalizedEnd = groupIndex?.[1] ?? normalizedStart + normalizedText.length
+      const { start, end } = mapNormalizedRange(searchable, normalizedStart, normalizedEnd, text.length)
+      const matchText = text.slice(start, end)
+      if (!matchText || (def.validate && !def.validate(normalizedText))) continue
 
       const baseConfidence = def.baseConfidence ?? 1
       const confidence = def.contextEnhancer
         ? applyContextEnhancer(text, start, end, def.contextEnhancer, baseConfidence)
         : baseConfidence
+      if (def.minimumConfidence !== undefined && confidence < def.minimumConfidence) continue
 
       matches.push({
         text: matchText,
@@ -492,6 +691,7 @@ export function detectRegexPII(
         start,
         end,
         confidence,
+        ...(def.defaultAction ? { suggestedAction: def.defaultAction } : {}),
       })
     }
   }
@@ -503,18 +703,20 @@ export function detectRegexPII(
     try {
       const regex = withIndices(new RegExp(custom.pattern, getCustomFlags(custom.flags)))
       let m: RegExpExecArray | null
-      while ((m = regex.exec(text)) !== null) {
+      while ((m = regex.exec(searchable.text)) !== null) {
         if (!m[0]) {
           regex.lastIndex += 1
           continue
         }
 
         const group = custom.captureGroup ?? 0
-        const matchText = m[group] ?? m[0]
+        const normalizedText = m[group] ?? m[0]
         const groupIndex = m.indices?.[group]
-        const start = groupIndex?.[0] ?? m.index
-        const end = groupIndex?.[1] ?? start + matchText.length
-        if (!matchText) continue
+        const normalizedStart = groupIndex?.[0] ?? m.index
+        const normalizedEnd = groupIndex?.[1] ?? normalizedStart + normalizedText.length
+        const { start, end } = mapNormalizedRange(searchable, normalizedStart, normalizedEnd, text.length)
+        const matchText = text.slice(start, end)
+        if (!normalizedText || !matchText) continue
 
         const hasCustomContext =
           (custom.contextWords && custom.contextWords.length > 0) ||

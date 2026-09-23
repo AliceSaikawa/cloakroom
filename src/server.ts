@@ -1,4 +1,4 @@
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import {
   disableCategory,
@@ -11,9 +11,10 @@ import {
 } from './controlState.js'
 import { resolveConfiguredCategory } from './controlCategory.js'
 import { loadPIIConfig, reloadPIIConfig } from './config.js'
+import { hasControlRequestHeader, isLoopbackHostHeader } from './controlSecurity.js'
 import { BlockedByPolicyError, PIIFilter } from './piiFilter.js'
 import { resetPluginCache } from './pluginLoader.js'
-import { resolveProvider, shouldFilterMessagesPath } from './provider.js'
+import { getUpstreamTarget, isUnfilteredBodyEndpoint, resolveProvider, shouldFilterMessagesPath } from './provider.js'
 import { RequestBodyTooLargeError, readRequestBody } from './requestBody.js'
 import { restoreNonStreamingResponse } from './responseRestorer.js'
 import { SessionFilterStore } from './sessionFilterStore.js'
@@ -21,7 +22,7 @@ import { getSnapshot, incMaskedRequests, incPassthroughRequests } from './stats.
 import type { PIICategory, PIIFilterConfig } from './types.js'
 
 const DEFAULT_PORT = 8787
-const sessionFilters = new SessionFilterStore()
+const sessionFilters = new SessionFilterStore(loadPIIConfig())
 
 function getPort(): number {
   const raw = process.env['PII_PROXY_PORT']
@@ -94,6 +95,21 @@ function getControlCategory(req: IncomingMessage, prefix: string): string | unde
 
 function handleControlRequest(req: IncomingMessage, res: ServerResponse): boolean {
   const path = req.url?.split('?')[0] ?? '/'
+
+  if (path === '/control' || path.startsWith('/control/')) {
+    if (!isLoopbackHostHeader(req.headers.host)) {
+      writeJson(res, 403, { error: 'Control endpoints require a loopback Host header' })
+      return true
+    }
+    if (req.method !== 'GET' && req.method !== 'POST') {
+      writeJson(res, 405, { error: 'Method not allowed' })
+      return true
+    }
+    if (req.method === 'POST' && !hasControlRequestHeader(req)) {
+      writeJson(res, 403, { error: 'Missing X-Cloakroom-Control header' })
+      return true
+    }
+  }
 
   if (req.method === 'GET' && path === '/control/status') {
     writeControlStatus(res)
@@ -204,6 +220,15 @@ type StreamRestorerLike = {
   flush(): string
 }
 
+function requestUpstream(
+  target: string,
+  options: Parameters<typeof httpsRequest>[1],
+  callback: Parameters<typeof httpsRequest>[2],
+) {
+  const request = new URL(target).protocol === 'http:' ? httpRequest : httpsRequest
+  return request(target, options, callback)
+}
+
 function normalizeUpstreamHeaders(
   headers: IncomingMessage['headers'],
   host: string,
@@ -221,6 +246,7 @@ function normalizeUpstreamHeaders(
   }
 
   out['host'] = host
+  delete out['x-provider']
   delete out['accept-encoding']
   if (bodyLength !== undefined) {
     out['content-length'] = String(bodyLength)
@@ -233,13 +259,14 @@ function normalizeUpstreamHeaders(
 
 async function proxyPassThrough(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await readBody(req)
-  const provider = resolveProvider(req)
+  const config = loadPIIConfig()
+  const provider = resolveProvider(req, config.upstreams)
   incPassthroughRequests(req.url?.split('?')[0] ?? '/')
   const headers = normalizeUpstreamHeaders(req.headers, provider.host, body.length)
 
   await new Promise<void>((resolve, reject) => {
-    const upstream = httpsRequest(
-      `${provider.origin}${req.url ?? '/'}`,
+    const upstream = requestUpstream(
+      getUpstreamTarget(req, provider),
       {
         method: req.method,
         headers,
@@ -252,6 +279,7 @@ async function proxyPassThrough(req: IncomingMessage, res: ServerResponse): Prom
       },
     )
 
+    upstream.setTimeout(0)
     upstream.on('error', reject)
     upstream.write(body)
     upstream.end()
@@ -270,11 +298,10 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
     return
   }
 
-  const provider = resolveProvider(req)
+  const config = loadPIIConfig()
+  const provider = resolveProvider(req, config.upstreams)
 
-  // Reuse the same filter within one logical session so placeholders can be restored
-  // across multiple turns. If the caller does not provide a session ID, we fall back
-  // to the active keep-alive socket.
+  // Rebuild mappings from the full conversation on each request by default.
   const filter = sessionFilters.acquire(req)
 
   let filteredBody: Record<string, unknown>
@@ -299,15 +326,26 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
   const headers = normalizeUpstreamHeaders(req.headers, provider.host, outgoingBody.length)
 
   await new Promise<void>((resolve, reject) => {
-    const upstream = httpsRequest(
-      `${provider.origin}${req.url ?? '/v1/messages'}`,
+    const upstream = requestUpstream(
+      getUpstreamTarget(req, provider),
       {
         method: 'POST',
         headers,
       },
       (upstreamRes) => {
+        const contentEncoding = upstreamRes.headers['content-encoding']
+        const isCompressed = Boolean(contentEncoding && contentEncoding !== 'identity')
         const isSSE = (upstreamRes.headers['content-type'] ?? '').includes('text/event-stream')
         writeUpstreamResponseHeaders(upstreamRes, res)
+
+        // Preserve an unexpectedly compressed payload instead of corrupting it
+        // by feeding the compressed bytes to a text/JSON restorer.
+        if (isCompressed) {
+          upstreamRes.pipe(res)
+          upstreamRes.on('end', resolve)
+          upstreamRes.on('error', reject)
+          return
+        }
 
         if (parsedBody['stream'] === true && isSSE) {
           const streamRestorer: StreamRestorerLike =
@@ -356,6 +394,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
       },
     )
 
+    upstream.setTimeout(0)
     upstream.on('error', reject)
     upstream.write(outgoingBody)
     upstream.end()
@@ -379,7 +418,18 @@ const server = createServer(async (req, res) => {
       return
     }
 
-    if (shouldFilterMessagesPath(req)) {
+    const config = loadPIIConfig()
+    if (!config.allowUnfilteredBodyRequests && isUnfilteredBodyEndpoint(req)) {
+      writeJson(res, 403, {
+        error: {
+          type: 'pii_filter_unsupported_endpoint',
+          message: 'This request body is not supported by the PII filter and was not forwarded',
+        },
+      })
+      return
+    }
+
+    if (shouldFilterMessagesPath(req, config.upstreams)) {
       await handleMessages(req, res)
       return
     }
@@ -395,6 +445,10 @@ const server = createServer(async (req, res) => {
     writeProxyError(res)
   }
 })
+
+// Provider reasoning and large requests may outlast Node's default request timeout.
+server.timeout = 0
+server.requestTimeout = 0
 
 server.listen(getPort(), '127.0.0.1')
 

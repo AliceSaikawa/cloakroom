@@ -35,7 +35,11 @@ function parseProviderOverride(
 ): Partial<Pick<PIIFilterConfig, 'enabled' | 'categories' | 'categoryActions'>> | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
   const obj = raw as Record<string, unknown>
-  const result: Partial<Pick<PIIFilterConfig, 'enabled' | 'categories' | 'categoryActions'>> = {}
+  const result: {
+    enabled?: PIIFilterConfig['enabled']
+    categories?: PIIFilterConfig['categories']
+    categoryActions?: PIIFilterConfig['categoryActions']
+  } = {}
   if (typeof obj['enabled'] === 'boolean') result.enabled = obj['enabled']
   if (Array.isArray(obj['categories'])) {
     result.categories = obj['categories'].filter((c): c is string => typeof c === 'string')
@@ -87,6 +91,37 @@ function normalizeMaxRequestBodyBytes(value: unknown): number {
     return DEFAULT_CONFIG.maxRequestBodyBytes
   }
   return value
+}
+
+function parseUpstreams(raw: unknown): Partial<Record<'anthropic' | 'openai', string>> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+
+  const parsed: Partial<Record<'anthropic' | 'openai', string>> = {}
+  for (const provider of ['anthropic', 'openai'] as const) {
+    const value = (raw as Record<string, unknown>)[provider]
+    if (typeof value !== 'string') continue
+
+    try {
+      const url = new URL(value)
+      const isLoopback = isLoopbackHost(url.hostname)
+      if (
+        !['https:', 'http:'].includes(url.protocol) ||
+        (url.protocol === 'http:' && !isLoopback) ||
+        url.username ||
+        url.password ||
+        url.search ||
+        url.hash
+      ) {
+        continue
+      }
+
+      parsed[provider] = url.toString().replace(/\/$/u, '')
+    } catch {
+      // Invalid custom URLs fall back to the built-in provider endpoint.
+    }
+  }
+
+  return parsed
 }
 
 function isLoopbackHost(hostname: string): boolean {
@@ -158,6 +193,9 @@ export function loadPIIConfig(): PIIFilterConfig {
           ? parsed.vaultTtlMinutes
           : DEFAULT_CONFIG.vaultTtlMinutes,
       fpe: parseFpeConfig(parsed.fpe),
+      upstreams: parseUpstreams(parsed.upstreams),
+      allowUnfilteredBodyRequests: parsed.allowUnfilteredBodyRequests === true,
+      statefulSessionMappings: parsed.statefulSessionMappings === true,
       auditLog: {
         enabled: Boolean(auditLog.enabled),
         destination: auditLog.destination === 'file' ? 'file' : 'stderr',

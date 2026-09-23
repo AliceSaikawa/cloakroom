@@ -73,6 +73,24 @@ function findPlaceholderRanges(text: string): ReadonlyArray<readonly [number, nu
   return ranges
 }
 
+function isCodeLikeContext(text: string, match: PIIMatch): boolean {
+  const lineStart = text.lastIndexOf('\n', match.start - 1) + 1
+  const lineBreak = text.indexOf('\n', match.end)
+  const lineEnd = lineBreak === -1 ? text.length : lineBreak
+  const context = text.slice(Math.max(0, lineStart - 120), Math.min(text.length, lineEnd + 120))
+  const prefix = text.slice(0, match.start)
+  const insideCodeFence = (prefix.match(/```/gu)?.length ?? 0) % 2 === 1
+  if (insideCodeFence) return true
+
+  const hasSourceFile = /\b[\w./-]+\.(?:[cm]?[jt]sx?|py|go|rs|java|swift|kt|cs|cpp|h)\b/iu.test(context)
+  const hasCodeKeyword = /(?:^|\n)\s*(?:import|export|const|let|var|class|interface|function|async|await|return|def|fn)\b/iu.test(context)
+  const compactLength = context.replace(/\s/gu, '').length
+  const symbolCount = context.match(/[{}()\[\];=<>]/gu)?.length ?? 0
+  const symbolDensity = compactLength > 0 ? symbolCount / compactLength : 0
+
+  return (hasSourceFile && hasCodeKeyword) || (hasCodeKeyword && symbolDensity >= 0.04) || symbolDensity >= 0.12
+}
+
 function overlapsPlaceholder(
   start: number,
   end: number,
@@ -361,5 +379,5 @@ export function detectHeuristicPII(text: string, categories: readonly PIICategor
     matches.push(...nameMatches)
   }
 
-  return matches
+  return matches.filter((match) => !isCodeLikeContext(text, match) || match.confidence >= 0.9)
 }

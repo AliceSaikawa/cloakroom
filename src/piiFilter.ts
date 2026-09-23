@@ -167,6 +167,14 @@ export class PIIFilter {
       cloned['system'] = await this.filterSystemField(cloned['system'])
     }
 
+    if (typeof cloned['instructions'] === 'string') {
+      cloned['instructions'] = await this.filterText(cloned['instructions'], false)
+    }
+
+    if ('input' in cloned) {
+      cloned['input'] = await this.filterInputValue(cloned['input'], true)
+    }
+
     if (Array.isArray(cloned['messages'])) {
       cloned['messages'] = await this.filterMessages(cloned['messages'] as readonly unknown[])
     }
@@ -272,7 +280,7 @@ export class PIIFilter {
   private registerMaskedMatch(match: PIIMatch): string {
     if (this.allowlist.has(match.text)) return match.text
 
-    const action = this.config.categoryActions?.[match.category] ?? 'mask'
+    const action = this.config.categoryActions?.[match.category] ?? match.suggestedAction ?? 'mask'
 
     if (action === 'warn') {
       writeAuditLog(this.config.auditLog, {
