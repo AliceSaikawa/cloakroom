@@ -3,12 +3,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { getConfigPath } from './config.js'
 import { PIIFilter } from './piiFilter.js'
 import { DEFAULT_CONFIG } from './types.js'
 
 const DEFAULT_PROXY_URL = 'http://127.0.0.1:8787'
 const CLAUDE_DIR = join(homedir(), '.claude')
-const CONFIG_PATH = join(CLAUDE_DIR, 'pii-filter.json')
 const CLAUDE_ENV_PATH = join(CLAUDE_DIR, '.env')
 const HERMES_ENV_PATH = join(homedir(), '.hermes', '.env')
 
@@ -55,16 +55,17 @@ function ensureClaudeDir(): void {
 }
 
 function writeDefaultConfig(force: boolean): void {
-  ensureClaudeDir()
+  const configPath = getConfigPath()
+  mkdirSync(dirname(configPath), { recursive: true })
 
-  if (existsSync(CONFIG_PATH) && !force) {
-    process.stdout.write(`Config already exists: ${CONFIG_PATH}\n`)
+  if (existsSync(configPath) && !force) {
+    process.stdout.write(`Config already exists: ${configPath}\n`)
     process.stdout.write('Use --force to overwrite it.\n')
     return
   }
 
-  writeFileSync(CONFIG_PATH, `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`)
-  process.stdout.write(`Created config: ${CONFIG_PATH}\n`)
+  writeFileSync(configPath, `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`)
+  process.stdout.write(`Created config: ${configPath}\n`)
 }
 
 function upsertEnvLine(contents: string, key: string, value: string): string {
@@ -88,14 +89,14 @@ function installProxyEnvironment(ctx: CommandContext): void {
   if (target === 'claude-code') {
     ensureClaudeDir()
     const existing = existsSync(CLAUDE_ENV_PATH) ? readFileSync(CLAUDE_ENV_PATH, 'utf8') : ''
-    let updated = upsertEnvLine(existing, 'ANTHROPIC_BASE_URL', proxyUrl)
-    updated = upsertEnvLine(updated, 'OPENAI_BASE_URL', `${proxyUrl}/v1`)
+    let updated = upsertEnvLine(existing, 'ANTHROPIC_BASE_URL', `${proxyUrl}/anthropic`)
+    updated = upsertEnvLine(updated, 'OPENAI_BASE_URL', `${proxyUrl}/openai/v1`)
     writeFileSync(CLAUDE_ENV_PATH, updated)
     process.stdout.write(`Updated Claude Code env: ${CLAUDE_ENV_PATH}\n`)
   } else if (target === 'hermes-agent') {
     mkdirSync(dirname(HERMES_ENV_PATH), { recursive: true })
     const existing = existsSync(HERMES_ENV_PATH) ? readFileSync(HERMES_ENV_PATH, 'utf8') : ''
-    writeFileSync(HERMES_ENV_PATH, upsertEnvLine(existing, 'OPENAI_BASE_URL', `${proxyUrl}/v1`))
+    writeFileSync(HERMES_ENV_PATH, upsertEnvLine(existing, 'OPENAI_BASE_URL', `${proxyUrl}/openai/v1`))
     process.stdout.write(`Updated Hermes Agent env: ${HERMES_ENV_PATH}\n`)
   } else {
     throw new Error('install supports --for=claude-code or --for=hermes-agent')

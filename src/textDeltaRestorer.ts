@@ -19,7 +19,7 @@ export class TextDeltaRestorer {
     let output = ''
 
     while (this.pending.length > 0) {
-      const opening = this.pending.match(/[\[［「]/u)
+      const opening = this.pending.match(/[\[［「<]/u)
       const openIdx = opening?.index ?? -1
       if (openIdx === -1) {
         output += this.pending
@@ -31,6 +31,31 @@ export class TextDeltaRestorer {
       this.pending = this.pending.slice(openIdx)
 
       const openChar = this.pending[0] ?? ''
+      if (openChar === '<') {
+        const tokenPrefix = '<pii:'
+        if (this.pending.length < tokenPrefix.length && tokenPrefix.startsWith(this.pending)) break
+        if (!this.pending.startsWith(tokenPrefix)) {
+          output += this.pending[0]
+          this.pending = this.pending.slice(1)
+          continue
+        }
+
+        const tokenEnd = this.pending.indexOf('/>')
+        if (tokenEnd === -1) {
+          if (this.pending.length > this.getMaxPendingLength()) {
+            output += this.pending[0]
+            this.pending = this.pending.slice(1)
+            continue
+          }
+          break
+        }
+
+        const candidate = this.pending.slice(0, tokenEnd + 2)
+        output += this.mappingTable.resolve(candidate) ?? candidate
+        this.pending = this.pending.slice(tokenEnd + 2)
+        continue
+      }
+
       const closeChar = openChar === '[' ? ']' : openChar === '［' ? '］' : '」'
       const closeIdx = this.pending.indexOf(closeChar)
       if (closeIdx === -1) {

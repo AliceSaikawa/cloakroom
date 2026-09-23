@@ -6,6 +6,8 @@ PIIを入口で預かり、番号札を渡し、出口で返すプロキシ。
 
 Claude Code(または任意の Anthropic API / OpenAI 互換クライアント)と上流APIの間に立つローカルHTTPプロキシ。リクエスト本文から個人情報(PII)を検出してプレースホルダに置き換え、レスポンスを表示する直前に元の値へ復元する。
 
+Cloakroomは追加の防御層であり、PIIを完全に検出する保証や法令遵守の保証はない。ここでいう `anonymize` はアプリケーション上で元の値へ戻さない動作を指し、法令上の「匿名加工情報」を作るものではない。
+
 ## 仕組み
 
 ```
@@ -20,7 +22,7 @@ Claude Code / APIクライアント
 │  3. ヒューリスティックNER (姓辞書+文脈)         │
 │  4. Ollama LLM (NAME/ORG/SCHOOL、オプション)    │
 │       ↓                                         │
-│  プレースホルダ登録 → [メールアドレスA] 等      │
+│  プレースホルダ登録 → <pii:email id="1"/> 等   │
 │  (セッション単位の MappingTable)                │
 └─────────────────────────────────────────────────┘
         │ マスク済みリクエスト
@@ -43,8 +45,8 @@ Claude Code / APIクライアント
 
 - 検出は4段階: **辞書(完全一致) → 正規表現 → ヒューリスティックNER → Ollama LLM(オプション)**。ヒューリスティックNERは組み込みの姓辞書・法人格・学校名サフィックスと文脈ルールだけで動く、ゼロランタイム依存の段(`heuristicNerEnabled`、既定 `true`)で、`NAME` / `ORG` / `SCHOOL` のいずれかが有効カテゴリに含まれる場合のみ動作する。Ollama LLM段は**オプションの精度向上段**で、デフォルトで無効(`ollamaEnabled: false`)。有効化しても `NAME` / `ORG` / `SCHOOL` の3カテゴリのみを担当し、有効カテゴリにこれらが含まれない場合は呼び出されない。
 - ヒューリスティックNER・Ollamaによる検出は **システムプロンプトには適用されない**(system フィールドは辞書・正規表現のみでフィルタされる)。ユーザー/アシスタントのメッセージ本文とツール結果のみが対象。
-- プレースホルダは日本語ラベル+アルファベット連番形式(例: `[メールアドレスA]`, `[人名B]`)。連番は `A` から `Z`、続いて `AA` の順で進む。同じ元値は同じプレースホルダに再利用される。`allowlist` に含まれる値はマスクされない。
-- マッピング(元値⇄プレースホルダ)は**セッション単位**で保持される。`x-pii-session-id` / `anthropic-session-id` / `x-session-id` のいずれかのヘッダがあればそのIDに紐付き(30分TTL)、無ければ同じ接続(TCPソケット)が生きている間だけ保持される。`x-pii-session-reset: 1` でそのセッションのマッピングを破棄できる。
+- 既定の内部プレースホルダは `<pii:email id="1"/>` のようなXMLタグ形式。Markdownリンクやコードの角括弧と衝突しにくく、カテゴリと連番で構成される。旧形式が必要なら `placeholderFormat: "legacy"` で `[メールアドレスA]` 形式に戻せる。同じ元値は同じプレースホルダに再利用され、`allowlist` の値はマスクされない。
+- マッピング(元値⇄プレースホルダ)は**セッション単位**で保持される。`x-pii-session-id` / `anthropic-session-id` / `x-session-id` のいずれかのヘッダがあればそのIDに紐付き(30分TTL)、無ければ同じ接続(TCPソケット)が生きている間だけ保持される。`x-pii-session-reset: 1` でそのセッションのマッピングを破棄できる。これらの制御用ヘッダは上流APIへ転送されない。
 
 ## セットアップ
 
@@ -80,8 +82,8 @@ Ollamaが応答しない/タイムアウトする場合、その回のOllama検�
 `cloakroom install --for=claude-code` は `~/.claude/.env` に以下を書き込む(既存の同名キーがあれば上書き):
 
 ```
-ANTHROPIC_BASE_URL=http://127.0.0.1:8787
-OPENAI_BASE_URL=http://127.0.0.1:8787/v1
+ANTHROPIC_BASE_URL=http://127.0.0.1:8787/anthropic
+OPENAI_BASE_URL=http://127.0.0.1:8787/openai/v1
 ```
 
 プロキシURLは環境変数 `PII_PROXY_URL` で上書きできる(既定 `http://127.0.0.1:8787`)。この`.env`を実際にClaude Codeの起動シェルへ反映させる(source/export する)のは利用者側の責務であり、`cloakroom` 自身はファイルへの書き込みのみを行う。
@@ -90,18 +92,18 @@ OPENAI_BASE_URL=http://127.0.0.1:8787/v1
 
 ### Hermes Agent から使う
 
-`cloakroom install --for=hermes-agent` は `~/.hermes/.env` に `OPENAI_BASE_URL=http://127.0.0.1:8787/v1` を書き込む。Hermes Agent側では、Chat Completions形式を使うカスタムプロバイダを設定する:
+`cloakroom install --for=hermes-agent` は `~/.hermes/.env` に `OPENAI_BASE_URL=http://127.0.0.1:8787/openai/v1` を書き込む。Hermes Agent側では、Chat Completions形式を使うカスタムプロバイダを設定する:
 
 ```yaml
 # ~/.hermes/config.yaml
 providers:
   cloakroom:
-    api: http://127.0.0.1:8787/v1
+    api: http://127.0.0.1:8787/openai/v1
     key_env: OPENAI_API_KEY
 model: cloakroom:利用するモデル名
 ```
 
-この経路では `/v1/chat/completions` がフィルタ対象になる。Hermes Agentのモデルプロバイダ設定とAPIキーは従来どおり利用者が管理する。
+この経路では `/openai/v1/chat/completions` がOpenAI上流へ送られ、PIIフィルタの対象になる。Hermes Agentのモデルプロバイダ設定とAPIキーは従来どおり利用者が管理する。
 
 ## 設定リファレンス
 
@@ -111,7 +113,10 @@ model: cloakroom:利用するモデル名
 |---|---|---|
 | `enabled` | `true` | フィルタ全体の有効/無効。`false` ならマスク・復元とも行わない |
 | `maxRequestBodyBytes` | `67108864` (64 MiB) | リクエスト本文の最大サイズ。超過時は上流へ転送せず `413 Payload Too Large` を返す |
-| `mode` | `"pseudonymize"` | `"pseudonymize"` はプレースホルダへ置換、`"anonymize"` は復元不能なプレースホルダへ置換、`"fake"` は復元可能なダミー値へ置換 |
+| `mode` | `"pseudonymize"` | `"pseudonymize"` は復元可能なプレースホルダ、`"anonymize"` はアプリケーション上で復元しないプレースホルダ、`"fake"` は復元可能なダミー値へ置換。法的な匿名加工を意味しない |
+| `placeholderFormat` | `"xml"` | `"xml"` は `<pii:email id="1"/>` 形式。旧クライアントとの互換性が必要なら `"legacy"` を指定 |
+| `placeholderInstructionEnabled` | `false` | `true` にすると、マスク対象を含むリクエストのsystem/instructionsへ、プレースホルダを改変しないよう短い注意書きを追加 |
+| `blockNonText` | `false` | `true` にすると画像・音声・動画・文書ブロックを含むリクエストを `415` で拒否。falseではこれらのペイロードを走査せず、そのまま通す |
 | `categories` | 組み込み全21カテゴリ (`URL_USER` を除く) | 有効化するPIIカテゴリ。`URL_USER`(URL内Basic認証情報)だけは既定では含まれず、使うには明示的に追加する必要がある |
 | `ollamaEndpoint` | `"http://localhost:11434"` | Ollama APIのエンドポイント。既定では `localhost` / `127.*` / `::1` のみ許可される |
 | `allowRemoteOllama` | `false` | `true` にするとリモートOllamaエンドポイントを許可する。未マスクの固有名詞が送信され得るため、信頼できるホストに限定する |
@@ -123,12 +128,16 @@ model: cloakroom:利用するモデル名
 | `dictionary` | `[]` | 完全一致で検出する既知の値({`text`, `category`})。正規表現・Ollamaより先に評価される |
 | `allowlist` | `[]` | ここに含まれる文字列(完全一致)は検出されてもマスクされない |
 | `categoryActions` | `{}` | カテゴリごとの処理方針。`"mask"`(既定: プレースホルダ置換)、`"block"`(リクエスト拒否、`446 Request Rejected` を返す)、`"warn"`(マスクせず audit log のみ記録)の3値を設定できる。例: `{"CREDIT_CARD": "block", "NAME": "warn"}` |
+| `include` | なし | 相対または絶対パスのJSON設定ファイルを読み込む。複数指定可。後から読み込むファイルが優先され、配列は置き換え |
+
+`auditLog` は既定で無効。有効にすると検出カテゴリ・位置・信頼度・モードを記録し、プレースホルダはマスク時のみ記録する。元のテキスト値は記録しない。`destination: "stderr"` は標準エラー、`"file"` は `path` または `~/.claude/pii-audit.jsonl` へJSON Lines形式で追記する。新規の親ディレクトリは `0700`、新規ログファイルは `0600` で作成するが、既存ファイルの権限変更やログローテーションは行わない。`warn` はマスクを行わず元のPIIを上流へ送るため、監査ログだけで送信を防げるわけではない。
 
 環境変数:
 
 | 変数 | 説明 |
 |---|---|
 | `CLAUDE_PII_FILTER=0` | 設定ファイルを読まず、フィルタを無効化した状態で起動する |
+| `PII_FILTER_CONFIG` | 使用するJSON設定ファイル。未指定時は `~/.claude/pii-filter.json`。`cloakroom init` もこのパスへ作成する |
 | `PII_PROXY_PORT` | プロキシサーバーのリッスンポート(既定 `8787`) |
 | `PII_PROXY_URL` | `cloakroom status` / `cloakroom install` が参照するプロキシURL(既定 `http://127.0.0.1:8787`) |
 
@@ -170,22 +179,22 @@ curl -X POST http://127.0.0.1:8787/control/filter
 curl -X POST http://127.0.0.1:8787/control/disable/PHONE
 ```
 
-サーバープロセスに `SIGUSR1` を送るとpassthroughをトグルできる(`kill -USR1 <pid>`)。
+サーバープロセスに `SIGUSR1` を送るとpassthroughをトグルできる(`kill -USR1 <pid>`)。これは既存運用向けの互換エイリアスとして維持し、通常の操作・状態確認には `/control` APIを使う。
 
 ## 対応プロバイダ/API
 
 | プロバイダ | フィルタ対象パス | 上流 |
 |---|---|---|
-| Anthropic | `POST /v1/messages`, `POST /v1/messages/count_tokens` | `https://api.anthropic.com` |
-| OpenAI互換 | `POST /v1/chat/completions` | `https://api.openai.com` |
+| Anthropic | `POST /anthropic/v1/messages`, `POST /anthropic/v1/messages/count_tokens` | `https://api.anthropic.com` |
+| OpenAI互換 | `POST /openai/v1/chat/completions`, `POST /openai/v1/responses` | `https://api.openai.com` |
 
-上記以外のパスへのリクエストは無加工のまま透過プロキシされる(デフォルトはAnthropic向け、`x-provider: openai` ヘッダを付けるとOpenAI向けに転送される)。ストリーミング応答(SSE)はAnthropicの `content_block_delta` 形式・OpenAIの `choices[].delta` 形式の両方に対応し、プレースホルダがチャンク境界で分割されても正しく復元されるようバッファリングする。`count_tokens` はマスク後の本文で計算されるため、元の本文とはトークン数がわずかに異なることがある。
+上記以外のパスも `/anthropic/` または `/openai/` のプレフィックスで上流を指定して透過プロキシできる。プレフィックスは上流へ送る前に取り除かれる。旧 `x-provider` ヘッダは振り分けに使わず、上流へも転送しない。プレフィックスのない既知APIパスは従来どおり振り分け、その他はAnthropic上流へ送る。SSEはAnthropic、OpenAI Chat Completions、OpenAI Responses APIの形式に対応する。
 
 ## 検出対象のPII種別(正規表現)
 
 `EMAIL`, `PHONE`(日本/国際形式), `ADDRESS`(日本の住所), `URL_USER`(URL内の認証情報), `API_KEY`(OpenAI/Anthropic/GitHub/Slack/Stripe/Google/AWS形式、PEM秘密鍵、JWT、文脈付き高エントロピートークン), `CREDIT_CARD`(Luhn検証あり), `MY_NUMBER`(マイナンバー形式), `NAME`(Gitの `Author:`/`Committer:` トレーラーのみ), `SSN`, `IP_ADDRESS`(IPv4/IPv6), `POSTAL_CODE`(郵便番号)。シークレット値を外部サービスへ照会して検証することはない。`NAME` / `ORG` / `SCHOOL` の一般的な検出はヒューリスティックNER段(既定有効)が担当し、Ollama LLM(オプション)はその精度を補強する。
 
-`fake` モードは、メールアドレスを `person1@example.com` のような安全なダミー値に置き換え、同じプロキシセッション内では元の値へ復元できる。モデルがプレースホルダを全角角括弧・日本語のかぎ括弧・空白入りで返しても、発行済みの値だけを復元する。`thinking` と `redacted_thinking` ブロックは署名を壊したりPIIを再挿入したりしないよう、プレースホルダのまま保持する。
+`fake` モードは同じセッション内で復元可能なダミー値へ置換する。値はメールが `personN@example.com`、電話が `000-0000-NNNN`、名前が `匿名利用者N`、住所が `東京都架空市サンプルN丁目1-1`、URL認証情報が `userN:password@example.com`、APIキーが `sk_test_placeholder_N`。IPは[RFC 5737](https://www.rfc-editor.org/rfc/rfc5737)の文書用ネットワーク (`192.0.2.0/24`、`198.51.100.0/24`、`203.0.113.0/24`)を使い、クレジットカード値はLuhn検査を通らない値にする。他カテゴリは `sample-<category>-N`。同じテキスト内にダミー値が既にある場合や、同じセッションで発行済みの場合は番号を進めて衝突を避ける。`fake` は既定モードではなく、既定は `pseudonymize`。カテゴリ単位の `fake` 切替には対応しない。`thinking` と `redacted_thinking` ブロックは署名を壊さないよう変更しない。
 
 ## ヒューリスティックNER(組み込み、Ollama不要)
 
@@ -207,6 +216,14 @@ Ollama無効時でもこの段によって主要な人名・組織名・学校�
 | `node test-hard-cases.mjs` | 人名と一般名詞の区別など、Ollama検出の難しいエッジケース検証 | `ollamaEnabled: true` 運用時のみ実行。**Ollamaがローカルで稼働** |
 | `node test-ollama-pii-v2.mjs` | Ollamaへの検出プロンプト自体の精度確認 | `ollamaEnabled: true` 運用時のみ実行。**Ollamaがローカルで稼働** |
 
+## プライバシーと免責
+
+- Cloakroomの検出は完全ではなく、画像・音声・動画・文書の中身をPII検査しない。`blockNonText: true` でこれらを含むリクエストを拒否できる。falseの場合、base64ペイロード等は性能上スキャンせず上流へ渡る。
+- このツールは法的助言、個人情報保護法への適合認証、または匿名加工情報の作成を提供しない。単にマスクするだけでは法令上の匿名加工情報になるとは限らないため、利用目的・データ・運用を責任者と確認する ([個人情報保護委員会](https://www.ppc.go.jp/personalinfo/tokumeikakouInfo/))。
+- Anthropicは商用サービスについて、明示的に参加する場合等を除き会話をモデル学習に使わないと説明している。一方で保持期間や例外はサービス・契約により異なり、他社APIにも適用されない。契約と各社の最新ポリシーを確認する ([学習データの説明](https://privacy.claude.com/en/articles/7996885-how-do-you-use-personal-data-in-model-training)、[保持期間](https://privacy.claude.com/en/articles/7996866-how-long-do-you-store-my-organization-s-data))。Cloakroomは既存のプロバイダ保護に追加する多層防御であり、唯一の保護策ではない。
+- `CLAUDE_PII_FILTER`、`~/.claude/pii-filter.json` は既存環境との互換性のため維持している。新しいCLI/パッケージ名は `cloakroom`。設定ファイルは `PII_FILTER_CONFIG` で別の場所へ移せる。
+- 監査ログは元のPIIを記録しない。ただし `warn` は元のPIIをマスクせず上流へ送る。ファイルログは自動ローテーションされないため、保存先の権限・保管期間・削除・ローテーションを運用側で管理する。
+
 ## 制限事項
 
 - ヒューリスティックNERは静的な姓辞書・法人格・学校名サフィックスに基づく近似的な検出であり、辞書外の姓、一般的でない組織名・学校名、辞書に無いローマ字表記などは検出漏れが起こり得る。より高い精度が必要な場合は `ollamaEnabled: true` を併用するか、`dictionary` / `customPatterns` に明示的に登録する
@@ -215,7 +232,7 @@ Ollama無効時でもこの段によって主要な人名・組織名・学校�
 - リモートOllamaを使う場合、固有名詞など未マスクのテキストがそのホストへ送信され得る。既定ではloopback以外の `ollamaEndpoint` は拒否され、必要な場合のみ `allowRemoteOllama: true` で明示的に許可する
 - passthrough/カテゴリ無効化などの実行時制御状態はプロセス全体で共有され、セッションごとの制御はできない。サーバー再起動でリセットされる
 - 明示的なセッションIDヘッダを送らないクライアントでは、マッピングはTCP接続が維持されている間のみ有効。接続が切れると、以前発行したプレースホルダは復元できなくなる
-- `/v1/messages`、`/v1/messages/count_tokens`、`/v1/chat/completions` 以外のパスはPIIフィルタなしで透過プロキシされる
+- フィルタ対象はAnthropic Messages、OpenAI Chat Completions/Responses API。その他のパスはPIIフィルタなしで透過プロキシされる
 - ソースファイル内のPIIがマスクされることで、コード生成の精度に影響が出る場合がある
 - プラグインはローカルモジュールを実行するため、信頼できるファイルだけを `plugins` に設定する。マルチモーダル対応の設計は [docs/multimodal-pii.md](docs/multimodal-pii.md) を参照
 

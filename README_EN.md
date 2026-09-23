@@ -6,6 +6,8 @@ Checks your PII at the door, hands the API a ticket, and gives everything back o
 
 A local HTTP proxy that sits between Claude Code (or any Anthropic API / OpenAI-compatible client) and the upstream API. It detects personally identifiable information (PII) in the request body, replaces it with placeholders, and restores the original values right before the response is displayed.
 
+Cloakroom is an additional defense layer. It does not guarantee complete PII detection or legal compliance. Its `anonymize` mode means that this application does not restore the original values; it does not create legally defined "anonymized information."
+
 ## How it works
 
 ```
@@ -20,7 +22,7 @@ Claude Code / API client
 │  3. Heuristic NER (surname dictionary + context)    │
 │  4. Ollama LLM match (NAME/ORG/SCHOOL, optional)    │
 │       ↓                                             │
-│  Placeholder registration → [メールアドレスA]       │
+│  Placeholder registration → <pii:email id="1"/>     │
 │  (per-session MappingTable)                         │
 └─────────────────────────────────────────────────────┘
         │ masked request
@@ -43,8 +45,8 @@ Claude Code / API client
 
 - Detection happens in four stages: **dictionary (exact match) → regex → heuristic NER → Ollama LLM (optional)**. The heuristic NER stage (`heuristicNerEnabled`, defaults to `true`) is a zero-runtime-dependency stage that runs on a built-in surname dictionary, legal-entity suffixes, and school-name suffixes plus contextual rules; it only runs when `NAME` / `ORG` / `SCHOOL` is in the active category list. The Ollama LLM stage is an **optional accuracy-boosting stage**, disabled by default (`ollamaEnabled: false`); when enabled, it only handles the `NAME` / `ORG` / `SCHOOL` categories, and is skipped entirely if none of those are in the active category list.
 - Heuristic NER and Ollama detection are **not applied to the system prompt** (the `system` field is only filtered by dictionary and regex). Only user/assistant message content and tool results go through those stages.
-- Built-in placeholders use Japanese labels plus alphabetic counters (e.g. `[メールアドレスA]`, `[人名B]`). Counters continue from `A` through `Z`, then `AA`. The same original value always reuses the same placeholder. Values in `allowlist` are never masked.
-- The original-value ↔ placeholder mapping is kept **per session**. If a request carries `x-pii-session-id`, `anthropic-session-id`, or `x-session-id`, the mapping is tied to that ID (30-minute TTL); otherwise it lives only as long as the underlying TCP connection stays open. Sending `x-pii-session-reset: 1` discards that session's mapping.
+- The default internal placeholder is an XML-style token such as `<pii:email id="1"/>`. It avoids collisions with Markdown links and code brackets and contains a category and counter. Set `placeholderFormat: "legacy"` to keep the old `[メールアドレスA]` style. The same original value reuses its placeholder; values in `allowlist` are not masked.
+- The original-value ↔ placeholder mapping is kept **per session**. If a request carries `x-pii-session-id`, `anthropic-session-id`, or `x-session-id`, the mapping is tied to that ID (30-minute TTL); otherwise it lives only as long as the underlying TCP connection stays open. Sending `x-pii-session-reset: 1` discards that session's mapping. These control headers are not forwarded to upstream APIs.
 
 ## Setup
 
@@ -80,8 +82,8 @@ If Ollama is unreachable or times out, that round of Ollama detection is silentl
 `cloakroom install --for=claude-code` writes the following into `~/.claude/.env` (overwriting any existing matching keys):
 
 ```
-ANTHROPIC_BASE_URL=http://127.0.0.1:8787
-OPENAI_BASE_URL=http://127.0.0.1:8787/v1
+ANTHROPIC_BASE_URL=http://127.0.0.1:8787/anthropic
+OPENAI_BASE_URL=http://127.0.0.1:8787/openai/v1
 ```
 
 The proxy URL can be overridden with the `PII_PROXY_URL` environment variable (default `http://127.0.0.1:8787`). Actually sourcing/exporting this `.env` file into the shell that launches Claude Code is left to the user — `cloakroom` itself only writes the file.
@@ -90,18 +92,18 @@ To disable filtering entirely (pass everything through untouched): `CLAUDE_PII_F
 
 ### Using it with Hermes Agent
 
-`cloakroom install --for=hermes-agent` writes `OPENAI_BASE_URL=http://127.0.0.1:8787/v1` to `~/.hermes/.env`. Configure a Chat Completions custom provider in Hermes Agent:
+`cloakroom install --for=hermes-agent` writes `OPENAI_BASE_URL=http://127.0.0.1:8787/openai/v1` to `~/.hermes/.env`. Configure a Chat Completions custom provider in Hermes Agent:
 
 ```yaml
 # ~/.hermes/config.yaml
 providers:
   cloakroom:
-    api: http://127.0.0.1:8787/v1
+    api: http://127.0.0.1:8787/openai/v1
     key_env: OPENAI_API_KEY
 model: cloakroom:your-model-name
 ```
 
-Requests through this provider use `/v1/chat/completions`, which Cloakroom filters. The user continues to manage their Hermes provider settings and API key.
+Requests through this provider use `/openai/v1/chat/completions`, which is routed to OpenAI and filtered. The user continues to manage their Hermes provider settings and API key.
 
 ## Configuration reference
 
@@ -111,7 +113,10 @@ Config file: `~/.claude/pii-filter.json` (created by `cloakroom init`, overwritt
 |---|---|---|
 | `enabled` | `true` | Master on/off switch. When `false`, neither masking nor restoration runs |
 | `maxRequestBodyBytes` | `67108864` (64 MiB) | Maximum request-body size. Requests above the limit receive `413 Payload Too Large` and are not sent upstream |
-| `mode` | `"pseudonymize"` | `"pseudonymize"` uses placeholders, `"anonymize"` uses irreversible placeholders, and `"fake"` uses reversible dummy values |
+| `mode` | `"pseudonymize"` | `"pseudonymize"` uses reversible placeholders, `"anonymize"` uses placeholders that this application does not restore, and `"fake"` uses reversible dummy values. This is not legal anonymization |
+| `placeholderFormat` | `"xml"` | `"xml"` uses `<pii:email id="1"/>`; set `"legacy"` for compatibility with clients that require the old format |
+| `placeholderInstructionEnabled` | `false` | When `true`, adds a short instruction to the system/instructions field asking the model to preserve placeholders unchanged, but only when masking occurs |
+| `blockNonText` | `false` | When `true`, rejects requests containing image, audio, video, or document blocks with `415`. When false, these payloads are passed through without inspection |
 | `categories` | All 21 built-in categories except `URL_USER` | Enabled PII categories. `URL_USER` (Basic-auth-style userinfo in a URL) is not included by default and must be added explicitly |
 | `ollamaEndpoint` | `"http://localhost:11434"` | Ollama API endpoint. By default, only `localhost`, `127.*`, and `::1` are allowed |
 | `allowRemoteOllama` | `false` | Allows remote Ollama endpoints when set to `true`. Use only with trusted hosts because unmasked proper nouns may be sent there |
@@ -123,12 +128,16 @@ Config file: `~/.claude/pii-filter.json` (created by `cloakroom init`, overwritt
 | `dictionary` | `[]` | Known exact-match values ({`text`, `category`}). Evaluated before regex and Ollama |
 | `allowlist` | `[]` | Exact-match strings that are never masked, even if detected |
 | `categoryActions` | `{}` | Per-category action policy. Accepted values are `"mask"` (default: replace with placeholder), `"block"` (reject the request with `446 Request Rejected`), and `"warn"` (skip masking, write to audit log only). Example: `{"CREDIT_CARD": "block", "NAME": "warn"}` |
+| `include` | None | Loads one or more JSON config files using relative or absolute paths. Later files override earlier files; arrays replace earlier arrays |
+
+`auditLog` is disabled by default. When enabled, it records the category, position, confidence, and mode; it includes the placeholder only when masking creates one. It does not record the original text. `destination: "stderr"` writes to standard error; `"file"` appends JSON Lines to `path` or `~/.claude/pii-audit.jsonl`. Newly created parent directories use mode `0700` and new log files use `0600`; existing file permissions are not changed and logs are not rotated automatically. `warn` skips masking and sends the original PII upstream, so the audit log does not prevent disclosure.
 
 Environment variables:
 
 | Variable | Description |
 |---|---|
 | `CLAUDE_PII_FILTER=0` | Skip reading the config file and start with filtering disabled |
+| `PII_FILTER_CONFIG` | JSON config file to use. Defaults to `~/.claude/pii-filter.json`; `cloakroom init` writes to this path too |
 | `PII_PROXY_PORT` | Port the proxy server listens on (default `8787`) |
 | `PII_PROXY_URL` | Proxy URL that `cloakroom status` / `cloakroom install` target (default `http://127.0.0.1:8787`) |
 
@@ -170,22 +179,22 @@ curl -X POST http://127.0.0.1:8787/control/filter
 curl -X POST http://127.0.0.1:8787/control/disable/PHONE
 ```
 
-Sending `SIGUSR1` to the server process toggles passthrough mode (`kill -USR1 <pid>`).
+Sending `SIGUSR1` to the server process toggles passthrough mode (`kill -USR1 <pid>`). It is retained as a compatibility alias for existing setups; use the `/control` API for normal operations and status checks.
 
 ## Supported providers / APIs
 
 | Provider | Filtered path | Upstream |
 |---|---|---|
-| Anthropic | `POST /v1/messages`, `POST /v1/messages/count_tokens` | `https://api.anthropic.com` |
-| OpenAI-compatible | `POST /v1/chat/completions` | `https://api.openai.com` |
+| Anthropic | `POST /anthropic/v1/messages`, `POST /anthropic/v1/messages/count_tokens` | `https://api.anthropic.com` |
+| OpenAI-compatible | `POST /openai/v1/chat/completions`, `POST /openai/v1/responses` | `https://api.openai.com` |
 
-Requests to any other path are passed through untouched (defaulting to Anthropic, or to OpenAI if the `x-provider: openai` header is set). Streaming (SSE) responses are supported for both Anthropic's `content_block_delta` format and OpenAI's `choices[].delta` format; text is buffered so placeholders split across chunk boundaries still restore correctly. `count_tokens` uses the masked request body, so its token count can differ slightly from the original request.
+Other paths can also be routed by using the `/anthropic/` or `/openai/` prefix; the prefix is removed before forwarding upstream. The legacy `x-provider` header no longer controls routing and is never forwarded. Known unprefixed API paths retain their existing routing; other unprefixed paths default to Anthropic. SSE is supported for Anthropic, OpenAI Chat Completions, and OpenAI Responses API.
 
 ## PII categories detected by regex
 
 `EMAIL`, `PHONE` (Japanese and international formats), `ADDRESS` (Japanese addresses), `URL_USER` (credentials embedded in a URL), `API_KEY` (OpenAI, Anthropic, GitHub, Slack, Stripe, Google, and AWS formats; PEM private keys; JWTs; and contextual high-entropy tokens), `CREDIT_CARD` (Luhn-validated), `MY_NUMBER` (Japanese My Number format), `NAME` (only via Git's `Author:`/`Committer:` trailers), `SSN`, `IP_ADDRESS` (IPv4/IPv6), `POSTAL_CODE`. Secret values are never sent to an external service for verification. General detection of `NAME` / `ORG` / `SCHOOL` is handled by the heuristic NER stage (enabled by default), with the optional Ollama LLM stage further improving accuracy.
 
-`fake` mode replaces values with safe dummy data such as `person1@example.com` and can restore the originals within the same proxy session. If a model returns an issued placeholder with full-width brackets, Japanese quotes, or added whitespace, it is still restored. `thinking` and `redacted_thinking` blocks deliberately keep their placeholders so signed reasoning blocks are not altered and PII is not reintroduced.
+`fake` mode replaces values with reversible dummy data within a session: emails use `personN@example.com`, phone numbers `000-0000-NNNN`, names `匿名利用者N`, addresses `東京都架空市サンプルN丁目1-1`, URL credentials `userN:password@example.com`, and API keys `sk_test_placeholder_N`. IP addresses use the [RFC 5737](https://www.rfc-editor.org/rfc/rfc5737) documentation-only networks (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`); credit card values fail the Luhn check. Other categories use `sample-<category>-N`. If a dummy already appears in the same text or was issued earlier in the session, the counter advances to avoid a collision. `fake` is not the default (`pseudonymize` is), and per-category `fake` actions are not supported. `thinking` and `redacted_thinking` blocks remain unchanged so signed blocks are not broken.
 
 ## Heuristic NER (built in, no Ollama required)
 
@@ -207,6 +216,14 @@ Even with Ollama disabled, this stage provides reasonable automatic coverage of 
 | `node test-hard-cases.mjs` | Hard edge cases for Ollama detection (e.g. names vs. common nouns) | Only relevant when running with `ollamaEnabled: true`. **Ollama running locally** |
 | `node test-ollama-pii-v2.mjs` | Accuracy of the Ollama detection prompt itself | Only relevant when running with `ollamaEnabled: true`. **Ollama running locally** |
 
+## Privacy and disclaimer
+
+- Cloakroom cannot fully detect PII and does not inspect image, audio, video, or document contents. Set `blockNonText: true` to reject requests containing these blocks. Otherwise, base64 and similar payloads are skipped for performance and sent upstream unchanged.
+- This tool does not provide legal advice, certify compliance with privacy laws, or create legally anonymized information. Masking alone may not meet the legal definition; assess your purpose, data, and operation with the responsible privacy/legal team ([Personal Information Protection Commission of Japan](https://www.ppc.go.jp/personalinfo/tokumeikakouInfo/)).
+- Anthropic states that it does not use conversations from its commercial services to train models unless users explicitly opt in or other stated exceptions apply. Retention and exceptions vary by product and contract, and this does not apply to other API providers. Check current terms for your account ([training data explanation](https://privacy.claude.com/en/articles/7996885-how-do-you-use-personal-data-in-model-training), [retention](https://privacy.claude.com/en/articles/7996866-how-long-do-you-store-my-organization-s-data)). Cloakroom adds defense in depth to provider protections; it is not the only protection layer.
+- `CLAUDE_PII_FILTER` and `~/.claude/pii-filter.json` remain for compatibility with existing installations. The current CLI/package name is `cloakroom`. Set `PII_FILTER_CONFIG` to use a different config path.
+- Audit logs do not contain the original PII. However, `warn` leaves PII unmasked in the request sent upstream. File logs are not rotated automatically, so operators must manage file permissions, retention, deletion, and rotation.
+
 ## Limitations
 
 - Heuristic NER is an approximate detector based on static surname/legal-entity/school-suffix dictionaries; surnames outside the dictionary, uncommon organization or school names, and unlisted romaji spellings can be missed. For higher accuracy, combine it with `ollamaEnabled: true` or register known values explicitly in `dictionary` / `customPatterns`
@@ -215,7 +232,7 @@ Even with Ollama disabled, this stage provides reasonable automatic coverage of 
 - When remote Ollama is enabled, unmasked text such as proper nouns may be sent to that host. Non-loopback `ollamaEndpoint` values are rejected by default; set `allowRemoteOllama: true` only when the host is trusted
 - Runtime controls (passthrough, per-category disable) are process-wide, not per-session, and reset when the server restarts
 - For clients that do not send an explicit session ID header, the mapping only lives as long as the TCP connection stays open; once it drops, previously issued placeholders can no longer be restored
-- Paths other than `/v1/messages`, `/v1/messages/count_tokens`, and `/v1/chat/completions` are proxied without any PII filtering
+- Only Anthropic Messages and OpenAI Chat Completions/Responses API paths are filtered; other paths are proxied without PII filtering
 - Masking PII inside source code can affect code-generation accuracy
 - Plugins execute local modules, so only configure trusted files in `plugins`. See [docs/multimodal-pii.md](docs/multimodal-pii.md) for the multimodal PII design
 

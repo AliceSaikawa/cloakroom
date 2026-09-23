@@ -1,13 +1,99 @@
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
-import { DEFAULT_CONFIG, type CategoryAction, type CategoryOption, type FpeConfig, type PIIFilterConfig, type ResponseDetectionConfig } from './types.js'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
+import {
+  DEFAULT_CONFIG,
+  type CategoryAction,
+  type CategoryOption,
+  type CustomCategoryConfig,
+  type CustomPatternEntry,
+  type DictionaryEntry,
+  type FpeConfig,
+  type PIICategory,
+  type PIIFilterConfig,
+  type ResponseDetectionConfig,
+} from './types.js'
 
-const CONFIG_PATH = join(homedir(), '.claude', 'pii-filter.json')
+const DEFAULT_CONFIG_PATH = join(homedir(), '.claude', 'pii-filter.json')
 
 let loadedConfig: PIIFilterConfig | null = null
 
 const VALID_CATEGORY_ACTIONS = new Set<string>(['mask', 'block', 'warn'])
+
+type JsonObject = Record<string, unknown>
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isCustomPattern(value: unknown): value is CustomPatternEntry {
+  return isJsonObject(value) && typeof value['name'] === 'string' && typeof value['pattern'] === 'string'
+}
+
+function isCustomCategory(value: unknown): value is CustomCategoryConfig {
+  return isJsonObject(value) && typeof value['name'] === 'string'
+}
+
+function isDictionaryEntry(value: unknown): value is DictionaryEntry {
+  return isJsonObject(value) && typeof value['text'] === 'string' && typeof value['category'] === 'string'
+}
+
+function readStringArray(value: unknown, fallback: readonly string[]): readonly string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : fallback
+}
+
+function mergeConfigObjects(base: JsonObject, override: JsonObject): JsonObject {
+  const merged: JsonObject = { ...base }
+
+  for (const [key, value] of Object.entries(override)) {
+    const existing = merged[key]
+    if (isJsonObject(existing) && isJsonObject(value)) {
+      merged[key] = mergeConfigObjects(existing, value)
+    } else {
+      // Arrays replace earlier arrays so an including file can set a full list.
+      merged[key] = value
+    }
+  }
+
+  return merged
+}
+
+function readConfigFile(path: string, ancestors: ReadonlySet<string> = new Set()): JsonObject {
+  const absolutePath = resolve(path)
+  if (ancestors.has(absolutePath)) {
+    throw new Error(`Circular config include: ${absolutePath}`)
+  }
+
+  const parsed: unknown = JSON.parse(readFileSync(absolutePath, 'utf8'))
+  if (!isJsonObject(parsed)) {
+    throw new Error(`Config must contain a JSON object: ${absolutePath}`)
+  }
+
+  const nextAncestors = new Set(ancestors)
+  nextAncestors.add(absolutePath)
+  const includes = typeof parsed['include'] === 'string'
+    ? [parsed['include']]
+    : Array.isArray(parsed['include'])
+      ? parsed['include']
+      : []
+
+  let combined: JsonObject = {}
+  for (const include of includes) {
+    if (typeof include !== 'string' || !include.trim()) {
+      throw new Error(`Config include entries must be non-empty paths: ${absolutePath}`)
+    }
+    const includePath = isAbsolute(include) ? include : join(dirname(absolutePath), include)
+    combined = mergeConfigObjects(combined, readConfigFile(includePath, nextAncestors))
+  }
+
+  const ownConfig = Object.fromEntries(Object.entries(parsed).filter(([key]) => key !== 'include'))
+  return mergeConfigObjects(combined, ownConfig)
+}
+
+export function getConfigPath(): string {
+  const configuredPath = process.env['PII_FILTER_CONFIG']
+  return configuredPath ? resolve(configuredPath) : DEFAULT_CONFIG_PATH
+}
 
 function parseFpeConfig(raw: unknown): FpeConfig {
   const defaults = DEFAULT_CONFIG.fpe ?? { enabled: false }
@@ -35,12 +121,13 @@ function parseProviderOverride(
 ): Partial<Pick<PIIFilterConfig, 'enabled' | 'categories' | 'categoryActions'>> | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
   const obj = raw as Record<string, unknown>
-  const result: Partial<Pick<PIIFilterConfig, 'enabled' | 'categories' | 'categoryActions'>> = {}
-  if (typeof obj['enabled'] === 'boolean') result.enabled = obj['enabled']
-  if (Array.isArray(obj['categories'])) {
-    result.categories = obj['categories'].filter((c): c is string => typeof c === 'string')
+  const result = {
+    ...(typeof obj['enabled'] === 'boolean' ? { enabled: obj['enabled'] } : {}),
+    ...(Array.isArray(obj['categories'])
+      ? { categories: obj['categories'].filter((c): c is string => typeof c === 'string') as PIICategory[] }
+      : {}),
+    ...(obj['categoryActions'] ? { categoryActions: parseCategoryActions(obj['categoryActions']) } : {}),
   }
-  if (obj['categoryActions']) result.categoryActions = parseCategoryActions(obj['categoryActions'])
   return Object.keys(result).length > 0 ? result : undefined
 }
 
@@ -120,44 +207,52 @@ export function loadPIIConfig(): PIIFilterConfig {
   }
 
   try {
-    const raw = readFileSync(CONFIG_PATH, 'utf8')
-    const parsed = JSON.parse(raw)
+    const parsed = readConfigFile(getConfigPath())
     const auditLog = {
       ...DEFAULT_CONFIG.auditLog,
-      ...(parsed.auditLog ?? {}),
+      ...(isJsonObject(parsed['auditLog']) ? parsed['auditLog'] : {}),
     }
-    const allowRemoteOllama = parsed.allowRemoteOllama === true
+    const allowRemoteOllama = parsed['allowRemoteOllama'] === true
 
-    loadedConfig = {
-      enabled: parsed.enabled ?? DEFAULT_CONFIG.enabled,
+    const config: PIIFilterConfig = {
+      enabled: typeof parsed['enabled'] === 'boolean' ? parsed['enabled'] : DEFAULT_CONFIG.enabled,
       mode:
-        parsed.mode === 'anonymize' || parsed.mode === 'fake'
-          ? parsed.mode
+        parsed['mode'] === 'anonymize' || parsed['mode'] === 'fake'
+          ? parsed['mode']
           : DEFAULT_CONFIG.mode,
-      maxRequestBodyBytes: normalizeMaxRequestBodyBytes(parsed.maxRequestBodyBytes),
-      categories: parsed.categories ?? DEFAULT_CONFIG.categories,
-      ollamaEndpoint: normalizeOllamaEndpoint(parsed.ollamaEndpoint, allowRemoteOllama),
+      placeholderFormat: parsed['placeholderFormat'] === 'legacy' ? 'legacy' : 'xml',
+      placeholderInstructionEnabled: parsed['placeholderInstructionEnabled'] === true,
+      blockNonText: parsed['blockNonText'] === true,
+      maxRequestBodyBytes: normalizeMaxRequestBodyBytes(parsed['maxRequestBodyBytes']),
+      categories: readStringArray(parsed['categories'], DEFAULT_CONFIG.categories) as readonly PIICategory[],
+      ollamaEndpoint: normalizeOllamaEndpoint(parsed['ollamaEndpoint'], allowRemoteOllama),
       allowRemoteOllama,
-      ollamaModel: parsed.ollamaModel ?? DEFAULT_CONFIG.ollamaModel,
-      ollamaEnabled: parsed.ollamaEnabled ?? DEFAULT_CONFIG.ollamaEnabled,
-      heuristicNerEnabled: parsed.heuristicNerEnabled ?? DEFAULT_CONFIG.heuristicNerEnabled,
-      customPatterns: parsed.customPatterns ?? DEFAULT_CONFIG.customPatterns,
-      customCategories: parsed.customCategories ?? DEFAULT_CONFIG.customCategories,
-      plugins: Array.isArray(parsed.plugins)
-        ? parsed.plugins.filter((plugin: unknown): plugin is string => typeof plugin === 'string')
+      ollamaModel: typeof parsed['ollamaModel'] === 'string' ? parsed['ollamaModel'] : DEFAULT_CONFIG.ollamaModel,
+      ollamaEnabled: typeof parsed['ollamaEnabled'] === 'boolean' ? parsed['ollamaEnabled'] : DEFAULT_CONFIG.ollamaEnabled,
+      heuristicNerEnabled: typeof parsed['heuristicNerEnabled'] === 'boolean' ? parsed['heuristicNerEnabled'] : DEFAULT_CONFIG.heuristicNerEnabled,
+      customPatterns: Array.isArray(parsed['customPatterns'])
+        ? parsed['customPatterns'].filter(isCustomPattern)
+        : DEFAULT_CONFIG.customPatterns,
+      customCategories: Array.isArray(parsed['customCategories'])
+        ? parsed['customCategories'].filter(isCustomCategory)
+        : DEFAULT_CONFIG.customCategories,
+      plugins: Array.isArray(parsed['plugins'])
+        ? parsed['plugins'].filter((plugin: unknown): plugin is string => typeof plugin === 'string')
         : DEFAULT_CONFIG.plugins,
-      dictionary: parsed.dictionary ?? DEFAULT_CONFIG.dictionary,
-      allowlist: parsed.allowlist ?? DEFAULT_CONFIG.allowlist,
-      categoryActions: parseCategoryActions(parsed.categoryActions),
-      categoryOptions: parseCategoryOptions(parsed.categoryOptions),
-      responseDetection: parseResponseDetection(parsed.responseDetection),
-      providerOverrides: parseProviderOverrides(parsed.providerOverrides),
-      vaultEnabled: parsed.vaultEnabled === true,
+      dictionary: Array.isArray(parsed['dictionary'])
+        ? parsed['dictionary'].filter(isDictionaryEntry)
+        : DEFAULT_CONFIG.dictionary,
+      allowlist: readStringArray(parsed['allowlist'], DEFAULT_CONFIG.allowlist),
+      categoryActions: parseCategoryActions(parsed['categoryActions']),
+      categoryOptions: parseCategoryOptions(parsed['categoryOptions']),
+      responseDetection: parseResponseDetection(parsed['responseDetection']),
+      providerOverrides: parseProviderOverrides(parsed['providerOverrides']),
+      vaultEnabled: parsed['vaultEnabled'] === true,
       vaultTtlMinutes:
-        typeof parsed.vaultTtlMinutes === 'number' && parsed.vaultTtlMinutes > 0
-          ? parsed.vaultTtlMinutes
+        typeof parsed['vaultTtlMinutes'] === 'number' && parsed['vaultTtlMinutes'] > 0
+          ? parsed['vaultTtlMinutes']
           : DEFAULT_CONFIG.vaultTtlMinutes,
-      fpe: parseFpeConfig(parsed.fpe),
+      fpe: parseFpeConfig(parsed['fpe']),
       auditLog: {
         enabled: Boolean(auditLog.enabled),
         destination: auditLog.destination === 'file' ? 'file' : 'stderr',
@@ -168,17 +263,22 @@ export function loadPIIConfig(): PIIFilterConfig {
             : DEFAULT_CONFIG.auditLog.reviewThreshold,
       },
     }
-  } catch {
+    loadedConfig = config
+  } catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) {
+      process.stderr.write(`Unable to load PII filter config: ${String(error)}\n`)
+    }
     loadedConfig = DEFAULT_CONFIG
   }
 
-  if (loadedConfig.fpe?.enabled && loadedConfig.mode === 'anonymize') {
+  const config = loadedConfig ?? DEFAULT_CONFIG
+  if (config.fpe?.enabled && config.mode === 'anonymize') {
     process.stderr.write(
       'Warning: fpe.enabled has no effect in anonymize mode — responses are never restored.\n',
     )
   }
 
-  return loadedConfig
+  return config
 }
 
 export function resetPIIConfigCache(): void {

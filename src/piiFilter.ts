@@ -72,6 +72,52 @@ export class BlockedByPolicyError extends Error {
   }
 }
 
+export class UnsupportedContentError extends Error {
+  constructor() {
+    super('This request contains non-text content and is blocked by policy')
+    this.name = 'UnsupportedContentError'
+  }
+}
+
+const NON_TEXT_BLOCK_TYPES = new Set([
+  'image',
+  'image_url',
+  'document',
+  'input_image',
+  'input_audio',
+  'input_file',
+  'input_video',
+  'audio',
+  'audio_url',
+  'video',
+  'video_url',
+])
+const STRUCTURAL_INPUT_KEYS = new Set(['type', 'role', 'id', 'call_id', 'item_id', 'status', 'name'])
+
+const PLACEHOLDER_INSTRUCTION_MARKER = 'Cloakroom placeholder'
+
+function isNonTextBlockType(value: unknown): boolean {
+  return typeof value === 'string' && NON_TEXT_BLOCK_TYPES.has(value)
+}
+
+function collectRequestText(value: unknown, output: string[]): void {
+  if (typeof value === 'string') {
+    output.push(value)
+    return
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) collectRequestText(item, output)
+    return
+  }
+
+  if (!value || typeof value !== 'object') return
+
+  const record = value as Record<string, unknown>
+  if (isNonTextBlockType(record['type'])) return
+  for (const item of Object.values(record)) collectRequestText(item, output)
+}
+
 function getCustomCategoryNames(config: PIIFilterConfig): readonly PIICategory[] {
   return config.customCategories
     .filter((category) => category.enabled !== false)
@@ -162,13 +208,31 @@ export class PIIFilter {
     this.blockedCategories.clear()
 
     const cloned = structuredClone(requestBody)
+    const collisionTexts: string[] = []
+    if (this.config.mode === 'fake') collectRequestText(cloned, collisionTexts)
 
     if ('system' in cloned) {
-      cloned['system'] = await this.filterSystemField(cloned['system'])
+      cloned['system'] = await this.filterSystemField(cloned['system'], collisionTexts)
     }
 
     if (Array.isArray(cloned['messages'])) {
-      cloned['messages'] = await this.filterMessages(cloned['messages'] as readonly unknown[])
+      cloned['messages'] = await this.filterMessages(cloned['messages'] as readonly unknown[], collisionTexts)
+    }
+
+    if ('instructions' in cloned) {
+      cloned['instructions'] = await this.filterInputValue(cloned['instructions'], false, collisionTexts)
+    }
+
+    if ('input' in cloned) {
+      cloned['input'] = await this.filterInputValue(cloned['input'], true, collisionTexts)
+    }
+
+    if (
+      this.config.placeholderInstructionEnabled &&
+      this.config.mode !== 'fake' &&
+      this.mappingTable.hasMappings()
+    ) {
+      this.addPlaceholderInstruction(cloned)
     }
 
     if (this.blockedCategories.size > 0) {
@@ -185,8 +249,9 @@ export class PIIFilter {
     const restored = this.mappingTable.replaceAllPlaceholders(text)
     if (restored !== text) {
       // Count how many placeholders were substituted by checking the difference
-      const before = (text.match(/\[[^\]\r\n]{1,256}\]/gu) ?? []).length
-      const after = (restored.match(/\[[^\]\r\n]{1,256}\]/gu) ?? []).length
+      const placeholderPattern = /(?:\[[^\]\r\n]{1,256}\]|<pii:[^>\r\n]{1,256}\/?>)/giu
+      const before = (text.match(placeholderPattern) ?? []).length
+      const after = (restored.match(placeholderPattern) ?? []).length
       const resolved = before - after
       if (resolved > 0) incRestoredPlaceholders(resolved)
     }
@@ -269,7 +334,60 @@ export class PIIFilter {
     this.mappingTable.clear()
   }
 
-  private registerMaskedMatch(match: PIIMatch): string {
+  private addPlaceholderInstruction(body: Record<string, unknown>): void {
+    const legacy = this.config.placeholderFormat === 'legacy'
+    const example = legacy ? '[EMAIL_A]' : '<pii:email id="1"/>'
+    const instruction = `${PLACEHOLDER_INSTRUCTION_MARKER} ${example} represents a masked value. Keep it unchanged; do not translate, expand, or remove it.`
+    const alreadyIncluded = (value: unknown): boolean => {
+      if (typeof value === 'string') return value.includes(PLACEHOLDER_INSTRUCTION_MARKER)
+      if (Array.isArray(value)) return value.some((item) => alreadyIncluded(item))
+      if (value && typeof value === 'object') {
+        return Object.values(value as Record<string, unknown>).some((item) => alreadyIncluded(item))
+      }
+      return false
+    }
+    const append = (value: unknown): string => {
+      const current = typeof value === 'string' ? value : ''
+      return current.includes(PLACEHOLDER_INSTRUCTION_MARKER)
+        ? current
+        : `${current}${current ? '\n' : ''}${instruction}`
+    }
+
+    if ('system' in body) {
+      if (!alreadyIncluded(body['system'])) {
+        if (typeof body['system'] === 'string') {
+          body['system'] = append(body['system'])
+        } else if (Array.isArray(body['system'])) {
+          body['system'] = [...body['system'], { type: 'text', text: instruction }]
+        }
+      }
+      return
+    }
+
+    if ('instructions' in body) {
+      const instructions = body['instructions']
+      if (typeof instructions === 'string') {
+        body['instructions'] = append(instructions)
+      } else if (instructions == null) {
+        body['instructions'] = instruction
+      }
+      return
+    }
+
+    const messages = body['messages']
+    if (!Array.isArray(messages) || alreadyIncluded(messages)) return
+
+    const insertionIndex = messages.findIndex((message) => {
+      if (!message || typeof message !== 'object') return true
+      const role = (message as Record<string, unknown>)['role']
+      return role !== 'system' && role !== 'developer'
+    })
+    const systemMessage = { role: 'system', content: instruction }
+    const index = insertionIndex === -1 ? messages.length : insertionIndex
+    body['messages'] = [...messages.slice(0, index), systemMessage, ...messages.slice(index)]
+  }
+
+  private registerMaskedMatch(match: PIIMatch, collisionTexts: readonly string[]): string {
     if (this.allowlist.has(match.text)) return match.text
 
     const action = this.config.categoryActions?.[match.category] ?? 'mask'
@@ -327,11 +445,12 @@ export class PIIFilter {
 
     const categoryOption = this.config.categoryOptions?.[match.category]
     const context = categoryOption ? extractContext(match.text, match.category, categoryOption) : undefined
+    const placeholderFormat = this.config.placeholderFormat ?? 'legacy'
 
     let createReplacement: ((count: number) => string) | undefined
     if (this.config.mode === 'fake') {
-      createReplacement = (count) => createFakeValue(match.category, count)
-    } else if (context !== undefined) {
+      createReplacement = (count) => this.createUniqueFakeValue(match.category, count, collisionTexts)
+    } else if (context !== undefined && placeholderFormat === 'legacy') {
       createReplacement = (count) => `[${baseLabel}${toAlphabeticSequence(count)}${context}]`
     }
 
@@ -341,6 +460,8 @@ export class PIIFilter {
       baseLabel,
       isReversible,
       createReplacement,
+      placeholderFormat,
+      placeholderFormat === 'xml' ? context : undefined,
     )
 
     incDetectionsByCategory(match.category)
@@ -361,7 +482,19 @@ export class PIIFilter {
     return placeholder
   }
 
-  private async filterMessages(messages: readonly unknown[]): Promise<unknown[]> {
+  private createUniqueFakeValue(category: PIICategory, count: number, collisionTexts: readonly string[]): string {
+    let candidateNumber = count
+    let value = createFakeValue(category, candidateNumber)
+
+    while (collisionTexts.some((text) => text.includes(value)) || this.mappingTable.hasReplacement(value)) {
+      candidateNumber += 1
+      value = createFakeValue(category, candidateNumber)
+    }
+
+    return value
+  }
+
+  private async filterMessages(messages: readonly unknown[], collisionTexts: readonly string[]): Promise<unknown[]> {
     const filtered: unknown[] = []
 
     for (const msg of messages) {
@@ -372,7 +505,7 @@ export class PIIFilter {
 
       const message = { ...(msg as Record<string, unknown>) }
       if ('content' in message) {
-        message['content'] = await this.filterContent(message['content'], true)
+        message['content'] = await this.filterContent(message['content'], true, collisionTexts)
       }
       filtered.push(message)
     }
@@ -380,9 +513,9 @@ export class PIIFilter {
     return filtered
   }
 
-  private async filterSystemField(system: unknown): Promise<unknown> {
+  private async filterSystemField(system: unknown, collisionTexts: readonly string[]): Promise<unknown> {
     if (typeof system === 'string') {
-      return this.filterText(system, false)
+      return this.filterText(system, false, collisionTexts)
     }
 
     if (Array.isArray(system)) {
@@ -394,8 +527,13 @@ export class PIIFilter {
         }
 
         const out = { ...(block as Record<string, unknown>) }
+        if (isNonTextBlockType(out['type'])) {
+          this.rejectNonTextIfConfigured()
+          filteredBlocks.push(out)
+          continue
+        }
         if (out['type'] === 'text' && typeof out['text'] === 'string') {
-          out['text'] = await this.filterText(out['text'], false)
+          out['text'] = await this.filterText(out['text'], false, collisionTexts)
         }
         filteredBlocks.push(out)
       }
@@ -405,8 +543,12 @@ export class PIIFilter {
     return system
   }
 
-  private async filterContent(content: unknown, useOllama: boolean): Promise<unknown> {
-    if (typeof content === 'string') return this.filterText(content, useOllama)
+  private async filterContent(
+    content: unknown,
+    useOllama: boolean,
+    collisionTexts: readonly string[],
+  ): Promise<unknown> {
+    if (typeof content === 'string') return this.filterText(content, useOllama, collisionTexts)
 
     if (!Array.isArray(content)) return content
 
@@ -418,17 +560,22 @@ export class PIIFilter {
       }
 
       const out = { ...(block as Record<string, unknown>) }
+      if (isNonTextBlockType(out['type'])) {
+        this.rejectNonTextIfConfigured()
+        filteredBlocks.push(out)
+        continue
+      }
 
-      if (out['type'] === 'text' && typeof out['text'] === 'string') {
-        out['text'] = await this.filterText(out['text'], useOllama)
+      if ((out['type'] === 'text' || out['type'] === 'input_text' || out['type'] === 'output_text') && typeof out['text'] === 'string') {
+        out['text'] = await this.filterText(out['text'], useOllama, collisionTexts)
       } else if (out['type'] === 'tool_result') {
         if (typeof out['content'] === 'string') {
-          out['content'] = await this.filterText(out['content'], useOllama)
+          out['content'] = await this.filterText(out['content'], useOllama, collisionTexts)
         } else if (Array.isArray(out['content'])) {
-          out['content'] = await this.filterContent(out['content'], useOllama)
+          out['content'] = await this.filterContent(out['content'], useOllama, collisionTexts)
         }
       } else if (out['type'] === 'tool_use' && 'input' in out) {
-        out['input'] = await this.filterInputValue(out['input'], useOllama)
+        out['input'] = await this.filterInputValue(out['input'], useOllama, collisionTexts)
       } else if (out['type'] === 'thinking' || out['type'] === 'redacted_thinking') {
         // These blocks can be signed by the provider. Keep placeholders as-is
         // so a client may safely send the block back without breaking a signature.
@@ -440,21 +587,35 @@ export class PIIFilter {
     return filteredBlocks
   }
 
-  private async filterInputValue(value: unknown, useOllama: boolean): Promise<unknown> {
-    if (typeof value === 'string') return this.filterText(value, useOllama)
+  private async filterInputValue(
+    value: unknown,
+    useOllama: boolean,
+    collisionTexts: readonly string[],
+  ): Promise<unknown> {
+    if (typeof value === 'string') return this.filterText(value, useOllama, collisionTexts)
 
     if (Array.isArray(value)) {
       const output: unknown[] = []
       for (const item of value) {
-        output.push(await this.filterInputValue(item, useOllama))
+        output.push(await this.filterInputValue(item, useOllama, collisionTexts))
       }
       return output
     }
 
     if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>
+      if (isNonTextBlockType(record['type'])) {
+        this.rejectNonTextIfConfigured()
+        return value
+      }
+
       const output: Record<string, unknown> = {}
-      for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-        output[key] = await this.filterInputValue(item, useOllama)
+      for (const [key, item] of Object.entries(record)) {
+        if (typeof record['type'] === 'string' && STRUCTURAL_INPUT_KEYS.has(key)) {
+          output[key] = item
+          continue
+        }
+        output[key] = await this.filterInputValue(item, useOllama, collisionTexts)
       }
       return output
     }
@@ -462,7 +623,15 @@ export class PIIFilter {
     return value
   }
 
-  private async filterText(text: string, useOllama: boolean): Promise<string> {
+  private rejectNonTextIfConfigured(): void {
+    if (this.config.blockNonText) throw new UnsupportedContentError()
+  }
+
+  private async filterText(
+    text: string,
+    useOllama: boolean,
+    collisionTexts: readonly string[],
+  ): Promise<string> {
     if (!text.trim()) return text
 
     let filtered = text
@@ -476,19 +645,19 @@ export class PIIFilter {
         categories,
         [...this.config.dictionary, ...getCustomDictionary(this.config)],
       )
-      filtered = applyReplacements(filtered, dictionaryMatches, this.registerMaskedMatch.bind(this))
+      filtered = applyReplacements(filtered, dictionaryMatches, (match) => this.registerMaskedMatch(match, collisionTexts))
 
       const regexMatches = detectRegexPII(filtered, categories, getCustomPatterns(this.config))
-      filtered = applyReplacements(filtered, regexMatches, this.registerMaskedMatch.bind(this))
+      filtered = applyReplacements(filtered, regexMatches, (match) => this.registerMaskedMatch(match, collisionTexts))
 
       if (wantsHeuristicNer(this.config, categories)) {
         const heuristicMatches = detectHeuristicPII(filtered, categories)
-        filtered = applyReplacements(filtered, heuristicMatches, this.registerMaskedMatch.bind(this))
+        filtered = applyReplacements(filtered, heuristicMatches, (match) => this.registerMaskedMatch(match, collisionTexts))
       }
     }
 
     const pluginMatches = await detectPluginPII(filtered, plugins)
-    filtered = applyReplacements(filtered, pluginMatches, this.registerMaskedMatch.bind(this))
+    filtered = applyReplacements(filtered, pluginMatches, (match) => this.registerMaskedMatch(match, collisionTexts))
 
     if (this.config.ollamaEnabled && useOllama) {
       const ollamaMatches = await detectOllamaPII(
@@ -499,7 +668,7 @@ export class PIIFilter {
       )
 
       if (ollamaMatches.length > 0) {
-        filtered = applyReplacements(filtered, ollamaMatches, this.registerMaskedMatch.bind(this))
+        filtered = applyReplacements(filtered, ollamaMatches, (match) => this.registerMaskedMatch(match, collisionTexts))
       }
     }
 
