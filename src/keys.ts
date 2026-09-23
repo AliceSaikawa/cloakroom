@@ -1,7 +1,7 @@
 import { hkdfSync, randomBytes } from 'node:crypto'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 const KEY_PATH = join(homedir(), '.claude', 'cloakroom-key')
 
@@ -13,6 +13,7 @@ export function loadOrCreateKey(): Buffer {
   }
   const key = randomBytes(32)
   // 0o600: owner read/write only — no group/world access
+  mkdirSync(dirname(KEY_PATH), { recursive: true, mode: 0o700 })
   writeFileSync(KEY_PATH, key, { mode: 0o600 })
   return key
 }

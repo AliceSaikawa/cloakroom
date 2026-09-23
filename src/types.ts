@@ -23,6 +23,9 @@ export const PII_CATEGORIES = [
   'USERNAME',
   'CREDENTIAL_PAIR',
   'PASSWORD',
+  'HOME_PATH',
+  'MAC_ADDRESS',
+  'DEVICE_ID',
 ] as const
 
 export type BuiltInPIICategory = (typeof PII_CATEGORIES)[number]
@@ -55,6 +58,9 @@ export const CATEGORY_LABELS: Record<BuiltInPIICategory, string> = {
   USERNAME: 'ユーザー名',
   CREDENTIAL_PAIR: '認証情報',
   PASSWORD: 'パスワード',
+  HOME_PATH: 'ホームディレクトリ',
+  MAC_ADDRESS: 'MACアドレス',
+  DEVICE_ID: '端末識別子',
 }
 
 export type PIIMatch = {
@@ -63,6 +69,8 @@ export type PIIMatch = {
   readonly start: number
   readonly end: number
   readonly confidence: number
+  readonly blockIndex?: number
+  readonly suggestedAction?: CategoryAction
 }
 
 export type DictionaryEntry = {
@@ -163,6 +171,9 @@ export type PIIFilterConfig = {
   readonly vaultEnabled?: boolean
   readonly vaultTtlMinutes?: number
   readonly fpe?: FpeConfig
+  readonly upstreams?: Partial<Record<'anthropic' | 'openai', string>>
+  readonly allowUnfilteredBodyRequests?: boolean
+  readonly statefulSessionMappings?: boolean
 }
 
 export const DEFAULT_CONFIG: PIIFilterConfig = {
@@ -190,6 +201,9 @@ export const DEFAULT_CONFIG: PIIFilterConfig = {
     'DATE_TIME',
     'MEDICAL_RECORD',
     'HEALTH_INSURANCE',
+    'HOME_PATH',
+    'MAC_ADDRESS',
+    'DEVICE_ID',
   ],
   ollamaEndpoint: 'http://localhost:11434',
   allowRemoteOllama: false,
@@ -213,4 +227,7 @@ export const DEFAULT_CONFIG: PIIFilterConfig = {
   vaultEnabled: false,
   vaultTtlMinutes: 30,
   fpe: { enabled: false },
+  upstreams: {},
+  allowUnfilteredBodyRequests: false,
+  statefulSessionMappings: false,
 }

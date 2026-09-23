@@ -1,4 +1,5 @@
 import type { PIICategory, PIIMatch } from './types.js'
+import { cacheOllamaMatches, getCachedOllamaMatches } from './ollamaCache.js'
 
 type OllamaDetection = {
   readonly text: string
@@ -44,6 +45,11 @@ If no PII found, return []`
 
 const JP_HONORIFICS = /(?:さん|さま|様|殿|氏|先生|くん|君|ちゃん|先輩|後輩|部長|課長|社長|会長|教授|博士)$/
 
+type ChunkDetectionResult = {
+  readonly matches: readonly PIIMatch[]
+  readonly cacheable: boolean
+}
+
 export async function detectOllamaPII(
   blocks: readonly { readonly index: number; readonly text: string }[],
   endpoint: string,
@@ -54,8 +60,15 @@ export async function detectOllamaPII(
   const shouldRun = [...OLLAMA_CATEGORIES].some((category) => categorySet.has(category))
   if (!shouldRun || blocks.length === 0) return []
 
-  const chunks = chunkBlocks(blocks, MAX_BATCH_CHARS)
+  const uncachedBlocks: { readonly index: number; readonly text: string }[] = []
   const allMatches: PIIMatch[] = []
+  for (const block of blocks) {
+    const cached = getCachedOllamaMatches(block.text, endpoint, model)
+    if (cached) allMatches.push(...cached)
+    else uncachedBlocks.push(block)
+  }
+
+  const chunks = chunkBlocks(uncachedBlocks, MAX_BATCH_CHARS)
   const startedAt = Date.now()
 
   for (const chunk of chunks) {
@@ -63,8 +76,26 @@ export async function detectOllamaPII(
     const remainingBudget = TOTAL_BUDGET_MS - elapsed
     if (remainingBudget <= 0) break
 
-    const matches = await detectChunk(chunk, endpoint, model, Math.min(TIMEOUT_MS, remainingBudget))
-    allMatches.push(...matches)
+    const result = await detectChunk(chunk, endpoint, model, Math.min(TIMEOUT_MS, remainingBudget))
+    allMatches.push(...result.matches)
+
+    // Cache both positive and negative detections only after a valid model reply.
+    if (result.cacheable) {
+      for (const block of chunk) {
+        cacheOllamaMatches(
+          block.text,
+          endpoint,
+          model,
+          result.matches.filter(
+            (match) =>
+              match.blockIndex === block.index &&
+              match.start >= 0 &&
+              match.end <= block.text.length &&
+              block.text.slice(match.start, match.end) === match.text,
+          ),
+        )
+      }
+    }
   }
 
   return allMatches
@@ -98,19 +129,19 @@ async function detectChunk(
   endpoint: string,
   model: string,
   timeoutMs: number,
-): Promise<readonly PIIMatch[]> {
+): Promise<ChunkDetectionResult> {
   const userPrompt = blocks.map((b) => `---BLOCK_${b.index}---\n${b.text}`).join('\n')
   const controller = new AbortController()
 
   let timeout: ReturnType<typeof setTimeout> | undefined
-  const timeoutPromise = new Promise<readonly PIIMatch[]>((resolve) => {
+  const timeoutPromise = new Promise<ChunkDetectionResult>((resolve) => {
     timeout = setTimeout(() => {
       controller.abort()
-      resolve([])
+      resolve({ matches: [], cacheable: false })
     }, timeoutMs)
   })
 
-  const requestPromise = (async (): Promise<readonly PIIMatch[]> => {
+  const requestPromise = (async (): Promise<ChunkDetectionResult> => {
     try {
       const response = await fetch(`${endpoint}/api/chat`, {
         method: 'POST',
@@ -127,12 +158,14 @@ async function detectChunk(
         signal: controller.signal,
       })
 
-      if (!response.ok) return []
+      if (!response.ok) return { matches: [], cacheable: false }
 
       const data = (await response.json()) as { readonly message?: { readonly content?: string } }
-      return parseDetections(data.message?.content ?? '', blocks)
+      if (typeof data.message?.content !== 'string') return { matches: [], cacheable: false }
+      const matches = parseDetections(data.message.content, blocks)
+      return matches ? { matches, cacheable: true } : { matches: [], cacheable: false }
     } catch {
-      return []
+      return { matches: [], cacheable: false }
     }
   })()
 
@@ -146,23 +179,23 @@ async function detectChunk(
 function parseDetections(
   content: string,
   blocks: readonly { readonly index: number; readonly text: string }[],
-): readonly PIIMatch[] {
+): readonly PIIMatch[] | undefined {
   const cleaned = content
     .replace(/^```(?:json)?\s*\n?/m, '')
     .replace(/\n?```\s*$/m, '')
     .trim()
 
   const jsonMatch = cleaned.match(/\[[\s\S]*\]/)
-  if (!jsonMatch) return []
+  if (!jsonMatch) return undefined
 
   let detections: readonly OllamaDetection[]
   try {
     detections = JSON.parse(jsonMatch[0]) as readonly OllamaDetection[]
   } catch {
-    return []
+    return undefined
   }
 
-  if (!Array.isArray(detections)) return []
+  if (!Array.isArray(detections)) return undefined
 
   const matches: PIIMatch[] = []
   for (const det of detections) {
@@ -188,6 +221,7 @@ function parseDetections(
         start: idx,
         end: idx + normalizedText.length,
         confidence: 0.8,
+        blockIndex: block.index,
       })
       searchStart = idx + normalizedText.length
     }
