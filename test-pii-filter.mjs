@@ -48,21 +48,22 @@ async function loadActualModules() {
     actualModuleCachePromise = (async () => {
       const bundleDir = mkdtempSync(join(tmpdir(), 'cloakroom-test-'))
       const entries = [
-        ['config.ts', 'config.mjs'],
-        ['controlState.ts', 'controlState.mjs'],
-        ['mappingTable.ts', 'mappingTable.mjs'],
-        ['piiFilter.ts', 'piiFilter.mjs'],
-        ['provider.ts', 'provider.mjs'],
-        ['regexFilter.ts', 'regexFilter.mjs'],
-        ['streamRestorer.ts', 'streamRestorer.mjs'],
-        ['openaiStreamRestorer.ts', 'openaiStreamRestorer.mjs'],
-        ['controlCategory.ts', 'controlCategory.mjs'],
-        ['pluginLoader.ts', 'pluginLoader.mjs'],
-        ['requestBody.ts', 'requestBody.mjs'],
-        ['responseRestorer.ts', 'responseRestorer.mjs'],
-        ['sessionFilterStore.ts', 'sessionFilterStore.mjs'],
-        ['stats.ts', 'stats.mjs'],
-        ['vault.ts', 'vault.mjs'],
+        ['core/config.ts', 'config.mjs'],
+        ['core/controlState.ts', 'controlState.mjs'],
+        ['core/mappingTable.ts', 'mappingTable.mjs'],
+        ['core/piiFilter.ts', 'piiFilter.mjs'],
+        ['server/provider.ts', 'provider.mjs'],
+        ['core/regexFilter.ts', 'regexFilter.mjs'],
+        ['api/messages/streamRestorer.ts', 'streamRestorer.mjs'],
+        ['api/completions/streamRestorer.ts', 'openaiStreamRestorer.mjs'],
+        ['core/controlCategory.ts', 'controlCategory.mjs'],
+        ['core/pluginLoader.ts', 'pluginLoader.mjs'],
+        ['server/requestBody.ts', 'requestBody.mjs'],
+        ['api/shared/responseRestorer.ts', 'responseRestorer.mjs'],
+        ['server/sessionFilterStore.ts', 'sessionFilterStore.mjs'],
+        ['core/stats.ts', 'stats.mjs'],
+        ['core/vault.ts', 'vault.mjs'],
+        ['api/messages/index.ts', 'messagesApi.mjs'],
       ]
 
       try {
@@ -96,6 +97,7 @@ async function loadActualModules() {
           sessionFilterStore,
           stats,
           vault,
+          messagesApi,
         ] = await Promise.all([
           import(pathToFileURL(join(bundleDir, 'config.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'controlState.mjs')).href),
@@ -112,6 +114,7 @@ async function loadActualModules() {
           import(pathToFileURL(join(bundleDir, 'sessionFilterStore.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'stats.mjs')).href),
           import(pathToFileURL(join(bundleDir, 'vault.mjs')).href),
+          import(pathToFileURL(join(bundleDir, 'messagesApi.mjs')).href),
         ])
 
         return {
@@ -130,6 +133,7 @@ async function loadActualModules() {
           sessionFilterStore,
           stats,
           vault,
+          messagesApi,
           bundleDir,
         }
       } catch (error) {
@@ -621,7 +625,7 @@ async function testControlState() {
 async function testAdvancedSafetyRegressions() {
   console.log('\n=== Advanced Safety Regressions ===')
 
-  const { config, piiFilter } = await loadActualModules()
+  const { config, piiFilter, messagesApi } = await loadActualModules()
   const baseConfig = {
     enabled: true,
     mode: 'pseudonymize',
@@ -707,7 +711,7 @@ async function testAdvancedSafetyRegressions() {
     const placeholder = filtered.messages[0].content.match(/\[[^\]]+\]/)?.[0]
     assert.ok(placeholder && placeholder.length > 32, '#19: test should create a long placeholder')
 
-    const restorer = filter.createStreamRestorer()
+    const restorer = messagesApi.createStreamRestorer(filter)
     const splitAt = Math.floor(placeholder.length / 2)
     const output =
       restorer.processChunk(

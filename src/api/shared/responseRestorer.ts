@@ -1,4 +1,4 @@
-import type { PIIFilter } from './piiFilter.js'
+import type { PIIFilter } from '../../core/piiFilter.js'
 
 function isJsonContentType(contentType: string): boolean {
   const normalized = contentType.toLowerCase()

@@ -1,5 +1,5 @@
-import type { MappingTable } from './mappingTable.js'
-import { TextDeltaRestorer } from './textDeltaRestorer.js'
+import type { MappingTable } from '../../core/mappingTable.js'
+import { TextDeltaRestorer } from '../../core/textDeltaRestorer.js'
 
 function findEventBoundary(buffer: string): number {
   const lf = buffer.indexOf('\n\n')

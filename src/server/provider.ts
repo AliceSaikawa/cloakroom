@@ -1,4 +1,6 @@
 import type { IncomingMessage } from 'node:http'
+import { completionsApi } from '../api/completions/index.js'
+import { messagesApi } from '../api/messages/index.js'
 import { normalizeHeaderValue } from './httpUtils.js'
 
 export type ProviderKind = 'anthropic' | 'openai'
@@ -15,21 +17,21 @@ const PROVIDERS: Record<ProviderKind, ProviderConfig> = {
     kind: 'anthropic',
     origin: 'https://api.anthropic.com',
     host: 'api.anthropic.com',
-    filteredPaths: ['/v1/messages', '/v1/messages/count_tokens'],
+    filteredPaths: messagesApi.paths,
   },
   openai: {
     kind: 'openai',
     origin: 'https://api.openai.com',
     host: 'api.openai.com',
-    filteredPaths: ['/v1/chat/completions'],
+    filteredPaths: completionsApi.paths,
   },
 }
 
-const PATH_TO_PROVIDER: Record<string, ProviderKind> = {
-  '/v1/messages': 'anthropic',
-  '/v1/messages/count_tokens': 'anthropic',
-  '/v1/chat/completions': 'openai',
-}
+const PATH_TO_PROVIDER: Record<string, ProviderKind> = Object.fromEntries(
+  Object.values(PROVIDERS).flatMap((provider) =>
+    provider.filteredPaths.map((path) => [path, provider.kind]),
+  ),
+)
 
 export function getRequestPath(req: IncomingMessage): string {
   return req.url?.split('?')[0] ?? '/'

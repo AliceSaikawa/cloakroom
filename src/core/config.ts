@@ -35,12 +35,13 @@ function parseProviderOverride(
 ): Partial<Pick<PIIFilterConfig, 'enabled' | 'categories' | 'categoryActions'>> | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
   const obj = raw as Record<string, unknown>
-  const result: Partial<Pick<PIIFilterConfig, 'enabled' | 'categories' | 'categoryActions'>> = {}
-  if (typeof obj['enabled'] === 'boolean') result.enabled = obj['enabled']
-  if (Array.isArray(obj['categories'])) {
-    result.categories = obj['categories'].filter((c): c is string => typeof c === 'string')
+  const result = {
+    ...(typeof obj['enabled'] === 'boolean' ? { enabled: obj['enabled'] } : {}),
+    ...(Array.isArray(obj['categories'])
+      ? { categories: obj['categories'].filter((c): c is string => typeof c === 'string') }
+      : {}),
+    ...(obj['categoryActions'] ? { categoryActions: parseCategoryActions(obj['categoryActions']) } : {}),
   }
-  if (obj['categoryActions']) result.categoryActions = parseCategoryActions(obj['categoryActions'])
   return Object.keys(result).length > 0 ? result : undefined
 }
 

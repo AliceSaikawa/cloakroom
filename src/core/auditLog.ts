@@ -8,7 +8,8 @@ const DEFAULT_AUDIT_LOG_PATH = join(homedir(), '.claude', 'pii-audit.jsonl')
 export type AuditLogEvent = {
   readonly timestamp: string
   readonly category: PIICategory
-  readonly placeholder: string
+  // Detection-only and warn events do not issue a replacement.
+  readonly placeholder?: string
   readonly confidence: number
   readonly position: {
     readonly start: number

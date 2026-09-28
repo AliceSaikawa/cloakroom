@@ -1,11 +1,11 @@
 import type { IncomingMessage } from 'node:http'
 import type { Socket } from 'node:net'
 import { readHeader } from './httpUtils.js'
-import { MappingTable } from './mappingTable.js'
-import { PIIFilter } from './piiFilter.js'
+import { MappingTable } from '../core/mappingTable.js'
+import { PIIFilter } from '../core/piiFilter.js'
 import { resolveProvider } from './provider.js'
-import type { PIIFilterConfig } from './types.js'
-import { cleanExpiredVaults, deleteSessionVault, loadSessionVault, saveSessionVault } from './vault.js'
+import type { PIIFilterConfig } from '../core/types.js'
+import { cleanExpiredVaults, deleteSessionVault, loadSessionVault, saveSessionVault } from '../core/vault.js'
 
 const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000
 const SESSION_ID_HEADERS = ['x-pii-session-id', 'anthropic-session-id', 'x-session-id'] as const
