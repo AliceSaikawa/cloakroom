@@ -45,6 +45,7 @@ Claude Code / API client
 - Heuristic NER and Ollama detection are **not applied to the system prompt** (the `system` field is only filtered by dictionary and regex). Only user/assistant message content and tool results go through those stages.
 - Built-in placeholders use Japanese labels plus alphabetic counters (e.g. `[メールアドレスA]`, `[人名B]`). Counters continue from `A` through `Z`, then `AA`. The same original value always reuses the same placeholder. Values in `allowlist` are never masked.
 - The original-value ↔ placeholder mapping is kept **per session**. If a request carries `x-pii-session-id`, `anthropic-session-id`, or `x-session-id`, the mapping is tied to that ID (30-minute TTL); otherwise it lives only as long as the underlying TCP connection stays open. Sending `x-pii-session-reset: 1` discards that session's mapping.
+- When a client disconnects before its response finishes, the corresponding upstream HTTP request and response are closed. A disconnect during asynchronous filtering prevents the upstream request from starting. Normal completion delivers the full response body and stream termination.
 
 ## Setup
 

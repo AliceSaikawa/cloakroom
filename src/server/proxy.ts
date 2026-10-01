@@ -7,6 +7,7 @@ import { incMaskedRequests, incPassthroughRequests } from '../core/stats.js'
 import { normalizeUpstreamHeaders, readBody, writeJson, writeUpstreamResponseHeaders } from './httpUtils.js'
 import { resolveProvider } from './provider.js'
 import type { SessionFilterStore } from './sessionFilterStore.js'
+import { withUpstreamLifecycle } from './upstreamLifecycle.js'
 
 export async function proxyPassThrough(
   req: IncomingMessage,
@@ -18,7 +19,8 @@ export async function proxyPassThrough(
   incPassthroughRequests(req.url?.split('?')[0] ?? '/')
   const headers = normalizeUpstreamHeaders(req.headers, provider.host, body.length)
 
-  await new Promise<void>((resolve, reject) => {
+  await withUpstreamLifecycle(res, (lifecycle) => {
+    const { resolve } = lifecycle
     const upstream = requestUpstream(
       `${provider.origin}${req.url ?? '/'}`,
       {
@@ -26,14 +28,14 @@ export async function proxyPassThrough(
         headers,
       },
       (upstreamRes) => {
+        if (!lifecycle.trackResponse(upstreamRes)) return
         writeUpstreamResponseHeaders(upstreamRes, res)
         upstreamRes.pipe(res)
         upstreamRes.on('end', resolve)
-        upstreamRes.on('error', reject)
       },
     )
 
-    upstream.on('error', reject)
+    if (!lifecycle.trackRequest(upstream)) return
     upstream.write(body)
     upstream.end()
   })
@@ -85,7 +87,8 @@ export async function proxyFilteredRequest(
   const outgoingBody = Buffer.from(JSON.stringify(filteredBody), 'utf8')
   const headers = normalizeUpstreamHeaders(req.headers, provider.host, outgoingBody.length)
 
-  await new Promise<void>((resolve, reject) => {
+  await withUpstreamLifecycle(res, (lifecycle) => {
+    const { resolve } = lifecycle
     const upstream = requestUpstream(
       `${provider.origin}${req.url ?? '/v1/messages'}`,
       {
@@ -93,6 +96,7 @@ export async function proxyFilteredRequest(
         headers,
       },
       (upstreamRes) => {
+        if (!lifecycle.trackResponse(upstreamRes)) return
         const isSSE = (upstreamRes.headers['content-type'] ?? '').includes('text/event-stream')
         writeUpstreamResponseHeaders(upstreamRes, res)
 
@@ -100,27 +104,30 @@ export async function proxyFilteredRequest(
           const streamRestorer = adapter.createStreamRestorer(filter)
 
           upstreamRes.on('data', (chunk: Buffer) => {
+            if (!lifecycle.active) return
             const restored = streamRestorer.processChunk(chunk)
             if (restored) res.write(restored)
           })
 
           upstreamRes.on('end', () => {
+            if (!lifecycle.active) return
             const tail = streamRestorer.flush()
             if (tail) res.write(tail)
             res.end()
             resolve()
           })
 
-          upstreamRes.on('error', reject)
           return
         }
 
         const responseChunks: Buffer[] = []
         upstreamRes.on('data', (chunk) => {
+          if (!lifecycle.active) return
           responseChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
         })
 
         upstreamRes.on('end', () => {
+          if (!lifecycle.active) return
           const contentType = String(upstreamRes.headers['content-type'] ?? '')
           const restored = restoreNonStreamingResponse(
             Buffer.concat(responseChunks),
@@ -136,11 +143,10 @@ export async function proxyFilteredRequest(
           resolve()
         })
 
-        upstreamRes.on('error', reject)
       },
     )
 
-    upstream.on('error', reject)
+    if (!lifecycle.trackRequest(upstream)) return
     upstream.write(outgoingBody)
     upstream.end()
   })
