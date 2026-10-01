@@ -155,6 +155,11 @@ function startServer(): void {
     stdio: 'inherit',
   })
 
+  // A signal sent only to the CLI must also stop its server. Keep the CLI
+  // alive until the child exits so callers can rely on shutdown completing.
+  process.on('SIGINT', () => { child.kill('SIGINT') })
+  process.on('SIGTERM', () => { child.kill('SIGTERM') })
+
   child.on('exit', (code, signal) => {
     if (signal) {
       process.exit(signal === 'SIGINT' || signal === 'SIGTERM' ? 0 : 1)
