@@ -44,7 +44,7 @@ Claude Code / APIクライアント
 - 検出は4段階: **辞書(完全一致) → 正規表現 → ヒューリスティックNER → Ollama LLM(オプション)**。ヒューリスティックNERは組み込みの姓辞書・法人格・学校名サフィックスと文脈ルールだけで動く、ゼロランタイム依存の段(`heuristicNerEnabled`、既定 `true`)で、`NAME` / `ORG` / `SCHOOL` のいずれかが有効カテゴリに含まれる場合のみ動作する。Ollama LLM段は**オプションの精度向上段**で、デフォルトで無効(`ollamaEnabled: false`)。有効化しても `NAME` / `ORG` / `SCHOOL` の3カテゴリのみを担当し、有効カテゴリにこれらが含まれない場合は呼び出されない。
 - ヒューリスティックNER・Ollamaによる検出は **システムプロンプトには適用されない**(system フィールドは辞書・正規表現のみでフィルタされる)。ユーザー/アシスタントのメッセージ本文とツール結果のみが対象。
 - プレースホルダは日本語ラベル+アルファベット連番形式(例: `[メールアドレスA]`, `[人名B]`)。連番は `A` から `Z`、続いて `AA` の順で進む。同じ元値は同じプレースホルダに再利用される。`allowlist` に含まれる値はマスクされない。
-- マッピング(元値⇄プレースホルダ)は**セッション単位**で保持される。`x-pii-session-id` / `anthropic-session-id` / `x-session-id` のいずれかのヘッダがあればそのIDに紐付き(30分TTL)、無ければ同じ接続(TCPソケット)が生きている間だけ保持される。`x-pii-session-reset: 1` でそのセッションのマッピングを破棄できる。
+- マッピング(元値⇄プレースホルダ)は**providerとセッション単位**で保持される。`x-pii-session-id` / `anthropic-session-id` / `x-session-id` のいずれかのヘッダがあればproviderとそのIDに紐付き(アクセスごとに延長される30分TTL)、無ければproviderと同じ接続(TCPソケット)が生きている間だけ保持される。`x-pii-session-reset: 1` または `true` で対象providerのセッションと保存済みVault対応表を破棄できる。別provider・別IDの対応表は共有しない。
 
 ## セットアップ
 
@@ -123,6 +123,10 @@ model: cloakroom:利用するモデル名
 | `dictionary` | `[]` | 完全一致で検出する既知の値({`text`, `category`})。正規表現・Ollamaより先に評価される |
 | `allowlist` | `[]` | ここに含まれる文字列(完全一致)は検出されてもマスクされない |
 | `categoryActions` | `{}` | カテゴリごとの処理方針。`"mask"`(既定: プレースホルダ置換)、`"block"`(リクエスト拒否、`446 Request Rejected` を返す)、`"warn"`(マスクせず audit log のみ記録)の3値を設定できる。例: `{"CREDIT_CARD": "block", "NAME": "warn"}` |
+
+`providerOverrides` は `anthropic` / `openai` ごとの `enabled`、`categories`、`categoryActions` を指定できる。起動時から適用し、`POST /control/reload` 後も既存の対応表を保持して設定を更新する。指定したプロパティは共通設定を置き換えるため、配列や `categoryActions` のキーを共通設定へ追加する動作ではない。
+
+`vaultEnabled` を有効にすると、明示的なセッションIDの対応表をprovider別ディレクトリとIDのSHA-256ファイル名で保存する。providerを判定できない旧形式の共有Vaultは自動で読み込まないため、更新後は新たな会話で対応表を作成する必要がある。旧ファイルを移行・書き換える処理は行わない。このprovider分離はMappingTable/Vaultの規則であり、FPEの鍵方式は変更しない。
 
 環境変数:
 
@@ -211,6 +215,8 @@ Ollama無効時でもこの段によって主要な人名・組織名・学校�
 
 | コマンド | 内容 | 前提 |
 |---|---|---|
+| `node test-provider-sessions.mjs` | 実JSON設定とローカルHTTPで両providerの起動設定・reload・複数ターン復元・分離・resetを検証 | 外部 API・API キー不要 |
+| `node test-session-vault.mjs` | 架空の対応表と隔離したVaultで保存・分離・reset・TTL・closeを検証 | 外部 API・既存キー不要 |
 | `node test-server.mjs` | ローカルのモック上流を使い、HTTP 受付・マスク・転送・復元を検証 | 外部 API 接続・API キー不要 |
 | `node test-pii-filter.mjs` | フィルタON/OFF、バグ回帰、プロバイダ振り分け、ストリーム復元、実行時制御、ヒューリスティックNERのテスト一式 | なし(esbuildでソースを都度バンドルして検証) |
 | `node test-pii-filter.mjs --proxy` | 上記に加え、稼働中のプロキシへ実際にリクエストするシナリオも実行 | プロキシが起動済み、かつ `ANTHROPIC_API_KEY` 設定済み |
