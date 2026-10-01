@@ -48,6 +48,10 @@ function getControlCategory(req: IncomingMessage, prefix: string): string | unde
   return decodeURIComponent(rawCategory).trim()
 }
 
+function escapeMetricLabel(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')
+}
+
 export function handleControlRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -74,10 +78,10 @@ export function handleControlRequest(
       `cloakroom_passthrough_requests_total ${snap.passthroughRequests}`,
       `cloakroom_active_sessions ${snap.activeSessions}`,
       ...Object.entries(snap.detectionsByCategory).map(
-        ([category, count]) => `cloakroom_detections_total{category="${category}"} ${count}`,
+        ([category, count]) => `cloakroom_detections_total{category="${escapeMetricLabel(category)}"} ${count}`,
       ),
       ...Object.entries(snap.passthroughByPath).map(
-        ([p, count]) => `cloakroom_passthrough_by_path_total{path="${p}"} ${count}`,
+        ([p, count]) => `cloakroom_passthrough_by_path_total{path="${escapeMetricLabel(p)}"} ${count}`,
       ),
     ]
     res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8' })
