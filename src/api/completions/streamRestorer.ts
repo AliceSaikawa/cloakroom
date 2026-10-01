@@ -1,3 +1,4 @@
+import { StringDecoder } from 'node:string_decoder'
 import type { MappingTable } from '../../core/mappingTable.js'
 import { TextDeltaRestorer } from '../../core/textDeltaRestorer.js'
 
@@ -11,6 +12,7 @@ function findEventBoundary(buffer: string): number {
 }
 
 export class OpenAIStreamRestorer {
+  private readonly utf8Decoder = new StringDecoder('utf8')
   private readonly textRestorer: TextDeltaRestorer
   private sseBuffer = ''
   private lastChoiceIndex = 0
@@ -22,7 +24,10 @@ export class OpenAIStreamRestorer {
   }
 
   processChunk(chunk: Buffer | string): string {
-    this.sseBuffer += chunk.toString('utf8')
+    if (chunk.length === 0) return ''
+    this.sseBuffer += typeof chunk === 'string'
+      ? this.utf8Decoder.end() + chunk
+      : this.utf8Decoder.write(chunk)
     let output = ''
 
     while (true) {
@@ -41,6 +46,7 @@ export class OpenAIStreamRestorer {
   }
 
   flush(): string {
+    this.sseBuffer += this.utf8Decoder.end()
     let out = ''
 
     if (this.sseBuffer.length > 0) {

@@ -20,6 +20,8 @@ const bundle = await build({
       export { resetControlState } from './src/core/controlState.ts';
       export { resetStats } from './src/core/stats.ts';
       export { loadPIIConfig as getTestConfig } from './src/core/config.ts';
+      export { StreamRestorer as MessagesStreamRestorer } from './src/api/messages/streamRestorer.ts';
+      export { OpenAIStreamRestorer } from './src/api/completions/streamRestorer.ts';
     `,
     resolveDir: projectDir,
     loader: 'ts',
@@ -71,6 +73,8 @@ const {
   resetControlState,
   resetStats,
   getTestConfig,
+  MessagesStreamRestorer,
+  OpenAIStreamRestorer,
 } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`)
 
 function fakeUpstream(respond, calls) {
@@ -172,6 +176,7 @@ const outgoingText = (call) => JSON.parse(call.body.toString('utf8')).messages[0
 const providers = [
   {
     name: 'Messages',
+    StreamRestorer: MessagesStreamRestorer,
     path: '/v1/messages',
     origin: 'https://api.anthropic.com',
     response: (text) => ({ content: [{ type: 'text', text }] }),
@@ -184,6 +189,7 @@ const providers = [
   },
   {
     name: 'Chat Completions',
+    StreamRestorer: OpenAIStreamRestorer,
     path: '/v1/chat/completions',
     origin: 'https://api.openai.com',
     response: (text) => ({ choices: [{ index: 0, message: { role: 'assistant', content: text } }] }),
@@ -262,6 +268,27 @@ test('control changes affect filtering in an existing session', async (t) => {
 })
 
 for (const provider of providers) {
+  for (const [kind, emptyChunk] of [['string', ''], ['Buffer', Buffer.alloc(0)]]) {
+    test(`${provider.name} ignores empty ${kind} chunks during UTF-8 decoding`, () => {
+      const masked = '[EMAIL_1]'
+      const text = `éこんにちは🧥 ${masked} さん`
+      const stream = Buffer.from(provider.delta(text) + provider.terminal)
+      const expected = provider.delta(text.replace(masked, email)) + provider.terminal
+      const mapping = {
+        getLongestPlaceholderLength: () => masked.length,
+        resolve: (candidate) => candidate === masked ? email : undefined,
+      }
+
+      for (let split = 0; split <= stream.length; split++) {
+        const restorer = new provider.StreamRestorer(mapping)
+        const first = restorer.processChunk(stream.subarray(0, split))
+        assert.equal(restorer.processChunk(emptyChunk), '', `${kind} chunk must emit no data`)
+        const output = first + restorer.processChunk(stream.subarray(split)) + restorer.flush()
+        assert.equal(output, expected, `${kind} chunk must preserve decoder state at byte ${split}`)
+      }
+    })
+  }
+
   test(`${provider.name} masks outbound content and restores JSON`, async (t) => {
     const { calls, send } = await startProxy(t, (call) => ({
       body: JSON.stringify(provider.response(outgoingText(call))),
@@ -301,6 +328,43 @@ for (const provider of providers) {
     assert.ok(response.text.endsWith(provider.terminal))
     assert.equal(calls.length, 1)
     assert.ok(!calls[0].body.includes(Buffer.from(email)))
+  })
+
+  test(`${provider.name} preserves UTF-8 when every SSE byte is a separate chunk`, async (t) => {
+    const { calls, send } = await startProxy(t, (call) => {
+      const masked = outgoingText(call)
+      const stream = Buffer.from(provider.delta(`こんにちは🧥 ${masked} さん`) + provider.terminal)
+      return {
+        headers: { 'content-type': 'text/event-stream' },
+        chunks: Array.from(stream, (byte) => Buffer.from([byte])),
+      }
+    })
+    const response = await send(provider.path, requestBody(true))
+    assert.equal(response.status, 200)
+    const restored = response.text.split('\n')
+      .filter((line) => line.startsWith('data: ') && line !== 'data: [DONE]')
+      .map((line) => provider.streamText(JSON.parse(line.slice(6))))
+      .join('')
+    assert.equal(restored, `こんにちは🧥 ${email} さん`)
+    assert.ok(response.text.endsWith(provider.terminal))
+    assert.ok(!calls[0].body.includes(Buffer.from(email)))
+  })
+
+  test(`${provider.name} flushes a UTF-8 SSE event without its final delimiter`, async (t) => {
+    const { send } = await startProxy(t, (call) => {
+      const stream = Buffer.from(provider.delta(`🧥 ${outgoingText(call)} 完了`).trimEnd())
+      return {
+        headers: { 'content-type': 'text/event-stream' },
+        chunks: Array.from(stream, (byte) => Buffer.from([byte])),
+      }
+    })
+    const response = await send(provider.path, requestBody(true))
+    assert.equal(response.status, 200)
+    const restored = response.text.split('\n')
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => provider.streamText(JSON.parse(line.slice(6))))
+      .join('')
+    assert.equal(restored, `🧥 ${email} 完了`)
   })
 }
 
