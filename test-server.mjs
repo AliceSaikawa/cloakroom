@@ -18,7 +18,7 @@ const bundle = await build({
       export { createProxyServer } from './src/server/app.ts';
       export { SessionFilterStore } from './src/server/sessionFilterStore.ts';
       export { resetControlState } from './src/core/controlState.ts';
-      export { resetStats } from './src/core/stats.ts';
+      export { resetStats, incDetectionsByCategory, incPassthroughRequests } from './src/core/stats.ts';
       export { loadPIIConfig as getTestConfig } from './src/core/config.ts';
     `,
     resolveDir: projectDir,
@@ -70,6 +70,8 @@ const {
   SessionFilterStore,
   resetControlState,
   resetStats,
+  incDetectionsByCategory,
+  incPassthroughRequests,
   getTestConfig,
 } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`)
 
@@ -216,6 +218,57 @@ test('health, control, and analyze remain local HTTP endpoints', async (t) => {
   assert.match((await send('/metrics')).text, /cloakroom_active_sessions 0/)
   assert.equal(calls.length, 0)
 })
+
+const metricLabels = [
+  { name: 'ordinary', value: 'EMAIL', escaped: 'EMAIL' },
+  { name: 'empty', value: '', escaped: '' },
+  { name: 'Unicode', value: '架空カテゴリ🙂', escaped: '架空カテゴリ🙂' },
+  { name: 'quote', value: 'Employee "internal"', escaped: String.raw`Employee \"internal\"` },
+  { name: 'backslash', value: String.raw`C:\test`, escaped: String.raw`C:\\test` },
+  { name: 'line feed', value: 'line\nbreak', escaped: String.raw`line\nbreak` },
+  { name: 'literal backslash-n', value: String.raw`line\nbreak`, escaped: String.raw`line\\nbreak` },
+  { name: 'repeated escapes', value: '""\\\\\n\n', escaped: String.raw`\"\"\\\\\n\n` },
+  { name: 'combined escapes', value: '前"\\\n後', escaped: String.raw`前\"\\\n後` },
+]
+
+for (const label of metricLabels) {
+  test(`/metrics preserves ${label.name} category and path labels without extra samples`, async (t) => {
+    const { calls, send } = await startProxy(t)
+    // Seed the exporter boundary directly: LF/empty labels cannot be sent in an
+    // HTTP request target, and this test must not depend on detection or config.
+    incDetectionsByCategory(label.value)
+    incDetectionsByCategory(label.value)
+    for (let i = 0; i < 3; i++) incPassthroughRequests(label.value)
+
+    const response = await send('/metrics')
+    assert.equal(response.status, 200)
+    assert.equal(response.headers['content-type'], 'text/plain; version=0.0.4; charset=utf-8')
+    const expectedLines = [
+      'cloakroom_masked_requests_total 0',
+      'cloakroom_restored_placeholders_total 0',
+      'cloakroom_unresolved_placeholders_total 0',
+      'cloakroom_passthrough_requests_total 3',
+      'cloakroom_active_sessions 0',
+      `cloakroom_detections_total{category="${label.escaped}"} 2`,
+      `cloakroom_passthrough_by_path_total{path="${label.escaped}"} 3`,
+    ]
+    assert.equal(response.text, expectedLines.join('\n') + '\n')
+    assert.equal(response.text.split('\n').length, 8, 'each label must stay on one sample line')
+
+    const stats = await send('/control/stats')
+    assert.equal(stats.status, 200)
+    assert.deepEqual(stats.json(), {
+      maskedRequests: 0,
+      restoredPlaceholders: 0,
+      unresolvedPlaceholders: 0,
+      passthroughRequests: 3,
+      activeSessions: 0,
+      detectionsByCategory: { [label.value]: 2 },
+      passthroughByPath: { [label.value]: 3 },
+    }, 'JSON stats must retain the original unescaped keys and counts')
+    assert.equal(calls.length, 0)
+  })
+}
 
 test('invalid JSON and oversized bodies are rejected before upstream contact', async (t) => {
   const { calls, send } = await startProxy(t)
