@@ -20,13 +20,18 @@ export function restoreNonStreamingResponse(
 
   const raw = responseBody.toString('utf8')
   if (!isJsonContentType(contentType)) {
-    return filter.restoreText(raw)
+    const restored = filter.restoreText(raw)
+    return restored === raw ? responseBody : restored
   }
 
   try {
-    return JSON.stringify(filter.restoreResponseBody(JSON.parse(raw)))
+    const parsed = JSON.parse(raw)
+    const original = JSON.stringify(parsed)
+    const restored = JSON.stringify(filter.restoreResponseBody(parsed))
+    return restored === original ? responseBody : restored
   } catch {
     // Some upstream error responses use a JSON content type but return text.
-    return filter.restoreText(raw)
+    const restored = filter.restoreText(raw)
+    return restored === raw ? responseBody : restored
   }
 }

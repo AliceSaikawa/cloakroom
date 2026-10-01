@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { request } from 'node:http'
+import { createServer, request } from 'node:http'
 import { dirname } from 'node:path'
 import { Readable } from 'node:stream'
 import { test } from 'node:test'
@@ -100,14 +101,14 @@ function fakeUpstream(respond, calls) {
   }
 }
 
-async function startProxy(t, respond = () => ({ body: '{}' }), configOverrides = {}) {
+async function startProxy(t, respond = () => ({ body: '{}' }), configOverrides = {}, requestUpstream) {
   resetControlState()
   resetStats()
   const calls = []
   const sessionFilters = new SessionFilterStore({ ...getTestConfig(), ...configOverrides })
   const server = createProxyServer({
     sessionFilters,
-    requestUpstream: fakeUpstream(respond, calls),
+    requestUpstream: requestUpstream ?? fakeUpstream(respond, calls),
   })
   assert.equal(server.listening, false, 'creating a server must not bind a port')
   t.after(async () => {
@@ -122,7 +123,7 @@ async function startProxy(t, respond = () => ({ body: '{}' }), configOverrides =
     server.listen(0, '127.0.0.1', resolve)
   })
 
-  function send(path, body, headers = {}, method = body === undefined ? 'GET' : 'POST') {
+  function send(path, body, headers = {}, method = body === undefined ? 'GET' : 'POST', trailers) {
     const bytes = body === undefined ? undefined
       : Buffer.isBuffer(body) ? body
         : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))
@@ -134,7 +135,10 @@ async function startProxy(t, respond = () => ({ body: '{}' }), configOverrides =
         method,
         agent: false,
         headers: {
-          ...(bytes ? { 'content-type': 'application/json', 'content-length': bytes.length } : {}),
+          ...(bytes ? {
+            'content-type': 'application/json',
+            ...(headers['transfer-encoding'] ? {} : { 'content-length': bytes.length }),
+          } : {}),
           ...headers,
         },
       }, (response) => {
@@ -146,6 +150,8 @@ async function startProxy(t, respond = () => ({ body: '{}' }), configOverrides =
           resolve({
             status: response.statusCode,
             headers: response.headers,
+            trailers: response.trailers,
+            rawTrailers: response.rawTrailers,
             body,
             text: body.toString('utf8'),
             json: () => JSON.parse(body.toString('utf8')),
@@ -154,7 +160,15 @@ async function startProxy(t, respond = () => ({ body: '{}' }), configOverrides =
       })
       client.on('error', reject)
       client.setTimeout(3000, () => client.destroy(new Error('Local proxy test timed out')))
-      client.end(bytes)
+      if (bytes && headers['transfer-encoding'] === 'chunked') {
+        const split = Math.floor(bytes.length / 2)
+        client.write(bytes.subarray(0, split))
+        client.write(bytes.subarray(split))
+        if (trailers !== undefined) client.addTrailers(trailers)
+        client.end()
+      } else {
+        client.end(bytes)
+      }
     })
   }
 
@@ -193,6 +207,290 @@ const providers = [
     streamText: (event) => event.choices?.[0]?.delta?.content ?? '',
   },
 ]
+
+// Use a real HTTP parser upstream: the in-memory mock cannot reject conflicting
+// Content-Length / Transfer-Encoding headers on the proxy's outgoing request.
+for (const provider of [...providers, { name: 'Pass-through', path: '/v1/unknown?chunked=1' }]) {
+  for (const chunked of [true, false]) {
+    test(`${provider.name} forwards ${chunked ? 'chunked' : 'fixed-length'} bodies with valid upstream framing`, async (t) => {
+      const received = []
+      const parserErrors = []
+      const upstream = createServer(async (req, res) => {
+        const chunks = []
+        for await (const chunk of req) chunks.push(chunk)
+        const body = Buffer.concat(chunks)
+        received.push({ headers: req.headers, body })
+        const parsed = JSON.parse(body.toString('utf8'))
+        const response = provider.response
+          ? provider.response(parsed.messages[0].content)
+          : parsed
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(response))
+      })
+      upstream.on('clientError', (error, socket) => {
+        parserErrors.push(error.code)
+        socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+      })
+      t.after(async () => {
+        upstream.closeAllConnections()
+        await new Promise((resolve) => upstream.close(resolve))
+      })
+      await new Promise((resolve, reject) => {
+        upstream.once('error', reject)
+        upstream.listen(0, '127.0.0.1', resolve)
+      })
+      const requestRealUpstream = (url, options, callback) => {
+        const target = new URL(url)
+        return request(`http://127.0.0.1:${upstream.address().port}${target.pathname}${target.search}`, options, callback)
+      }
+      const { send } = await startProxy(t, undefined, {}, requestRealUpstream)
+      const body = provider.response ? requestBody() : { input: email }
+      const response = await send(provider.path, body, chunked ? { 'transfer-encoding': 'chunked' } : {})
+      assert.equal(response.status, 200, `upstream parser errors: ${parserErrors.join(', ')}`)
+      assert.deepEqual(parserErrors, [])
+      assert.equal(received.length, 1)
+      assert.equal(received[0].headers['transfer-encoding'], undefined)
+      assert.equal(Number(received[0].headers['content-length']), received[0].body.length)
+      if (provider.response) {
+        assert.ok(!received[0].body.includes(Buffer.from(email)))
+        assert.equal(provider.text(response.json()), email)
+      } else {
+        assert.deepEqual(JSON.parse(received[0].body.toString('utf8')), body)
+        assert.deepEqual(response.json(), body)
+      }
+    })
+  }
+}
+
+const contentDigest = (body) => `sha-256=:${createHash('sha256').update(body).digest('base64')}:`
+const passThrough = { name: 'Pass-through', path: '/v1/unknown?trailers=1' }
+const trailerCases = [
+  { name: 'declared checksum and repeated metadata', provider: passThrough, text: '架空 🧥',
+    declared: 'Content-Digest, X-Note', repeated: true },
+  { name: 'undeclared actual trailers', provider: passThrough, text: '架空 🧥' },
+  { name: 'declaration without actual trailers', provider: passThrough, text: email,
+    declared: 'Content-Digest', noActual: true },
+  { name: 'empty GET body with actual trailer', provider: passThrough, empty: true, method: 'GET',
+    declared: 'Content-Digest' },
+  { name: 'empty-valued metadata', provider: passThrough, text: 'test',
+    declared: 'Content-Digest, X-Note', emptyValue: true },
+  { name: 'empty declaration without actual trailers', provider: passThrough, text: 'test',
+    declared: '', noActual: true, emptyDeclaration: true },
+  { name: 'ignored empty declaration elements', provider: passThrough, text: 'test',
+    declared: ', ', noActual: true, emptyDeclaration: true },
+  ...providers.flatMap((provider) => [
+    { name: 'unchanged body with checksum', provider, text: '架空 🧥', declared: 'Content-Digest' },
+    { name: 'masked body rejects stale checksum', provider, text: email, declared: 'Content-Digest', rejected: true },
+    { name: 'unchanged pretty JSON preserves checksum and bytes', provider, text: 'test', pretty: true,
+      declared: 'Content-Digest' },
+    { name: 'masked body with undeclared trailer rejects stale checksum', provider, text: email, rejected: true },
+    { name: 'masked body with declaration only still restores', provider, text: email,
+      declared: 'Content-Digest', noActual: true },
+    { name: 'disabled filter with unchanged body preserves checksum', provider, text: email,
+      declared: 'Content-Digest', disabled: true },
+  ]),
+]
+
+for (const entry of trailerCases) {
+  test(`${entry.provider.name} trailers: ${entry.name}`, async (t) => {
+    const received = []
+    const parserErrors = []
+    const original = entry.empty ? '' : JSON.stringify({
+      model: 'test-model', messages: [{ role: 'user', content: entry.text }],
+    }, null, entry.pretty ? 2 : undefined)
+    const trailers = entry.noActual ? undefined : [
+      ['Content-Digest', contentDigest(original)],
+      ...(entry.repeated ? [['X-Note', 'first'], ['X-Note', 'second']] : []),
+      ...(entry.emptyValue ? [['X-Note', '']] : []),
+    ]
+    const upstream = createServer(async (req, res) => {
+      const chunks = []
+      for await (const chunk of req) chunks.push(chunk)
+      const body = Buffer.concat(chunks)
+      received.push({ headers: req.headers, trailers: req.trailers, rawTrailers: req.rawTrailers, body })
+      // Verify a real content checksum, rather than accepting stale metadata.
+      if (req.trailers['content-digest'] && req.trailers['content-digest'] !== contentDigest(body)) {
+        res.writeHead(422); res.end('Content-Digest mismatch'); return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(entry.provider.response
+        ? JSON.stringify(entry.provider.response(JSON.parse(body.toString('utf8')).messages[0].content))
+        : body)
+    })
+    upstream.on('clientError', (error, socket) => {
+      parserErrors.push(error.code)
+      socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+    })
+    t.after(async () => {
+      upstream.closeAllConnections()
+      await new Promise((resolve) => upstream.close(resolve))
+    })
+    await new Promise((resolve, reject) => {
+      upstream.once('error', reject)
+      upstream.listen(0, '127.0.0.1', resolve)
+    })
+    const requestRealUpstream = (url, options, callback) => {
+      const target = new URL(url)
+      return request(`http://127.0.0.1:${upstream.address().port}${target.pathname}${target.search}`, options, callback)
+    }
+    const { send } = await startProxy(t, undefined, entry.disabled ? { enabled: false } : {}, requestRealUpstream)
+    const response = await send(entry.provider.path, original, {
+      'transfer-encoding': 'chunked', ...(entry.declared !== undefined ? { trailer: entry.declared } : {}),
+    }, entry.method ?? 'POST', trailers)
+    if (entry.rejected) {
+      assert.equal(response.status, 400)
+      assert.deepEqual(response.json(), { error: 'Request body validation metadata cannot be forwarded after transforming the body' })
+      assert.equal(received.length, 0, 'a transformed body with trailers must never reach upstream')
+    } else {
+      assert.equal(response.status, 200, response.text)
+      assert.equal(received.length, 1)
+      const sent = received[0]
+      if (entry.emptyDeclaration) {
+        assert.equal(Number(sent.headers['content-length']), sent.body.length)
+        assert.equal(sent.headers['transfer-encoding'], undefined)
+        assert.equal(sent.headers.trailer, undefined)
+      } else {
+        assert.equal(sent.headers['content-length'], undefined)
+        assert.equal(sent.headers['transfer-encoding'], 'chunked')
+        assert.ok(sent.headers.trailer.toLowerCase().split(',').map((name) => name.trim()).includes('content-digest'))
+      }
+      assert.deepEqual(sent.rawTrailers, trailers?.flat() ?? [], 'preserve duplicate fields, order, case and values')
+      if (entry.provider.response) {
+        assert.equal(entry.provider.text(response.json()), entry.text)
+        if (entry.noActual) assert.ok(!sent.body.includes(Buffer.from(email)), 'declaration-only input must still be masked')
+        else assert.equal(sent.body.toString('utf8'), original)
+      } else {
+        assert.equal(sent.body.toString('utf8'), original)
+        assert.equal(response.text, original)
+      }
+    }
+    assert.deepEqual(parserErrors, [])
+  })
+}
+
+
+// Exercise metadata at both actual HTTP boundaries, including end-of-body fields.
+async function startMetadataUpstream(t, respond, config = {}) {
+  const calls = []
+  const upstream = createServer(async (req, res) => {
+    const chunks = []
+    for await (const chunk of req) chunks.push(chunk)
+    const call = { body: Buffer.concat(chunks), headers: req.headers, rawTrailers: req.rawTrailers }
+    calls.push(call)
+    respond(call, res)
+  })
+  t.after(async () => {
+    upstream.closeAllConnections()
+    await new Promise((resolve) => upstream.close(resolve))
+  })
+  await new Promise((resolve, reject) => {
+    upstream.once('error', reject)
+    upstream.listen(0, '127.0.0.1', resolve)
+  })
+  const { send } = await startProxy(t, undefined, config, (url, options, callback) => {
+    const target = new URL(url)
+    return request(`http://127.0.0.1:${upstream.address().port}${target.pathname}${target.search}`, options, callback)
+  })
+  return { send, calls }
+}
+const validationNames = ['Content-Digest', 'Repr-Digest', 'Digest', 'Content-MD5', 'ETag', 'Signature', 'Signature-Input']
+const validationFields = (body) => Object.fromEntries(validationNames.map((name) => [name,
+  name.includes('Digest') ? contentDigest(body) : name === 'ETag' ? '"upstream-v1"' : 'upstream-attestation']))
+for (const provider of providers) {
+  for (const kind of ['ordinary trailers', ...validationNames.map((name) => 'validation header ' + name), 'preferences and preconditions', 'disabled pretty JSON']) {
+    test(`${provider.name} request metadata: ${kind}`, async (t) => {
+      const disabled = kind === 'disabled pretty JSON'
+      const input = JSON.stringify(requestBody(), null, disabled ? 2 : undefined)
+      const { send, calls } = await startMetadataUpstream(t, (call, res) => {
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify(provider.response(JSON.parse(call.body).messages[0].content)))
+      }, disabled ? { enabled: false } : {})
+      const trailers = kind === 'ordinary trailers' ? [['X-Note', 'first'], ['X-Note', 'second'], ['Server-Timing', 'mock;dur=1']] : undefined
+      const headers = trailers ? { 'transfer-encoding': 'chunked', trailer: 'X-Note, Server-Timing' }
+        : kind.startsWith('validation header ') ? { [kind.slice('validation header '.length)]: validationFields(input)[kind.slice('validation header '.length)] }
+          : disabled ? validationFields(input)
+          : { 'if-match': '"resource-v1"', 'if-none-match': '"resource-v0"', 'want-content-digest': 'sha-256=10', 'want-repr-digest': 'sha-256=10' }
+      const response = await send(provider.path, input, headers, 'POST', trailers)
+      if (kind.startsWith('validation header ')) {
+        assert.equal(response.status, 400)
+        assert.equal(calls.length, 0)
+      } else {
+        assert.equal(response.status, 200, response.text)
+        assert.equal(provider.text(response.json()), email)
+        assert.equal(calls.length, 1)
+        if (disabled) {
+          assert.equal(calls[0].body.toString(), input)
+          for (const [name, value] of Object.entries(headers)) assert.equal(calls[0].headers[name.toLowerCase()], value)
+        } else {
+          assert.ok(!calls[0].body.includes(Buffer.from(email)))
+          if (trailers) assert.deepEqual(calls[0].rawTrailers, trailers.flat())
+          else for (const [name, value] of Object.entries(headers)) assert.equal(calls[0].headers[name], value)
+        }
+      }
+    })
+  }
+}
+for (const provider of [passThrough, ...providers]) {
+  const modes = provider.response
+    ? ['pretty JSON fixed', 'binary trailers', 'restored JSON headers', 'restored JSON trailers', 'unchanged SSE', 'restored SSE', 'restored SSE flush', 'active unchanged SSE', 'empty 204', 'empty 304', 'empty 204 SSE', 'empty 304 SSE']
+    : ['pretty JSON fixed', 'binary trailers', 'unchanged SSE']
+  for (const mode of modes) {
+    test(`${provider.name} response metadata: ${mode}`, async (t) => {
+      const streaming = mode.includes('SSE')
+      const changed = mode.startsWith('restored')
+      const active = changed || mode === 'active unchanged SSE'
+      let original
+      const { send } = await startMetadataUpstream(t, (call, res) => {
+        const text = provider.response && active ? JSON.parse(call.body).messages[0].content : '架空 🧥'
+        original = mode === 'binary trailers' ? Buffer.from([0, 255, 128, 65])
+          : mode.startsWith('empty ') ? Buffer.alloc(0)
+          : streaming ? Buffer.from(mode === 'active unchanged SSE' ? provider.terminal
+            : provider.delta ? mode === 'restored SSE flush' ? provider.delta(text).trimEnd() : provider.delta(text) + provider.terminal : 'data: raw 🧥\r\n\r\n')
+          : Buffer.from(JSON.stringify(provider.response ? provider.response(text) : { text }, null, changed ? undefined : 2))
+        const trailers = mode.includes('trailers') || streaming && !mode.startsWith('empty ')
+        const headers = {
+          'Content-Type': mode === 'binary trailers' ? 'application/octet-stream' : streaming ? 'text/event-stream' : 'application/json',
+          'X-Note': 'response-metadata', 'Server-Timing': 'mock;dur=1',
+          ...validationFields(original),
+          ...(trailers ? { 'Transfer-Encoding': 'chunked', Trailer: validationNames.join(', ') + ', X-Note' }
+            : mode.startsWith('empty ') ? {} : { 'Content-Length': original.length }),
+        }
+        res.writeHead(mode.startsWith('empty ') ? Number(mode.split(' ')[1]) : 200, headers)
+        if (trailers) {
+          const split = Math.floor(original.length / 2)
+          res.write(original.subarray(0, split))
+          res.write(original.subarray(split))
+          res.addTrailers([...Object.entries(validationFields(original)), ['X-Note', 'first'], ['X-Note', 'second']])
+          res.end()
+        } else res.end(original)
+      })
+      const response = await send(provider.path, { ...requestBody(streaming && !!provider.response), messages: [{ role: 'user', content: mode === 'unchanged SSE' ? '架空 🧥' : email }] }, {})
+      // No PII in requests that exercise a provably unchanged SSE.
+      // For other unchanged bodies the request may still create a mapping.
+      assert.equal(response.status, mode.startsWith('empty ') ? Number(mode.split(' ')[1]) : 200)
+      assert.equal(response.headers['x-note'], 'response-metadata')
+      assert.equal(response.headers['server-timing'], 'mock;dur=1')
+      if (changed) {
+        assert.ok(response.text.includes(email))
+        assert.ok(!response.body.equals(original))
+      } else assert.deepEqual(response.body, original)
+      // Active SSE cannot know its final bytes before sending initial headers.
+      const potential = streaming && !!provider.response && mode !== 'unchanged SSE' && !mode.startsWith('empty ')
+      for (const name of validationNames) {
+        assert.equal(response.headers[name.toLowerCase()], changed || potential ? undefined : validationFields(original)[name])
+        if (mode.includes('trailers') || streaming && !mode.startsWith('empty ')) {
+          assert.equal(response.trailers[name.toLowerCase()], changed ? undefined : validationFields(original)[name])
+        }
+      }
+      if (mode.includes('trailers') || streaming && !mode.startsWith('empty ')) {
+        assert.deepEqual(response.rawTrailers.filter((_, i) => i % 2 === 0 && response.rawTrailers[i].toLowerCase() === 'x-note').length, 2)
+        assert.equal(response.trailers['x-note'], 'first, second')
+        if (changed && !streaming) assert.equal(response.headers.trailer, 'X-Note')
+      } else if (!changed && !mode.startsWith('empty ')) assert.equal(Number(response.headers['content-length']), original.length)
+      if (changed) assert.equal(response.headers['content-length'], undefined)
+    })
+  }
+}
 
 test('health, control, and analyze remain local HTTP endpoints', async (t) => {
   const { calls, send } = await startProxy(t)
