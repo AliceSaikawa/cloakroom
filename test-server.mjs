@@ -302,6 +302,43 @@ for (const provider of providers) {
     assert.equal(calls.length, 1)
     assert.ok(!calls[0].body.includes(Buffer.from(email)))
   })
+
+  test(`${provider.name} preserves UTF-8 when every SSE byte is a separate chunk`, async (t) => {
+    const { calls, send } = await startProxy(t, (call) => {
+      const masked = outgoingText(call)
+      const stream = Buffer.from(provider.delta(`こんにちは🧥 ${masked} さん`) + provider.terminal)
+      return {
+        headers: { 'content-type': 'text/event-stream' },
+        chunks: Array.from(stream, (byte) => Buffer.from([byte])),
+      }
+    })
+    const response = await send(provider.path, requestBody(true))
+    assert.equal(response.status, 200)
+    const restored = response.text.split('\n')
+      .filter((line) => line.startsWith('data: ') && line !== 'data: [DONE]')
+      .map((line) => provider.streamText(JSON.parse(line.slice(6))))
+      .join('')
+    assert.equal(restored, `こんにちは🧥 ${email} さん`)
+    assert.ok(response.text.endsWith(provider.terminal))
+    assert.ok(!calls[0].body.includes(Buffer.from(email)))
+  })
+
+  test(`${provider.name} flushes a UTF-8 SSE event without its final delimiter`, async (t) => {
+    const { send } = await startProxy(t, (call) => {
+      const stream = Buffer.from(provider.delta(`🧥 ${outgoingText(call)} 完了`).trimEnd())
+      return {
+        headers: { 'content-type': 'text/event-stream' },
+        chunks: Array.from(stream, (byte) => Buffer.from([byte])),
+      }
+    })
+    const response = await send(provider.path, requestBody(true))
+    assert.equal(response.status, 200)
+    const restored = response.text.split('\n')
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => provider.streamText(JSON.parse(line.slice(6))))
+      .join('')
+    assert.equal(restored, `🧥 ${email} 完了`)
+  })
 }
 
 test('a session mapping survives multiple HTTP connections and conversation turns', async (t) => {

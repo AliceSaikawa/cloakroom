@@ -1,3 +1,4 @@
+import { StringDecoder } from 'node:string_decoder'
 import type { MappingTable } from '../../core/mappingTable.js'
 import { TextDeltaRestorer } from '../../core/textDeltaRestorer.js'
 
@@ -11,6 +12,7 @@ function findEventBoundary(buffer: string): number {
 }
 
 export class StreamRestorer {
+  private readonly utf8Decoder = new StringDecoder('utf8')
   private readonly textRestorer: TextDeltaRestorer
   private sseBuffer = ''
   private lastContentIndex = 0
@@ -22,7 +24,9 @@ export class StreamRestorer {
   }
 
   processChunk(chunk: Buffer | string): string {
-    this.sseBuffer += chunk.toString('utf8')
+    this.sseBuffer += typeof chunk === 'string'
+      ? this.utf8Decoder.end() + chunk
+      : this.utf8Decoder.write(chunk)
     let output = ''
 
     while (true) {
@@ -41,6 +45,7 @@ export class StreamRestorer {
   }
 
   flush(): string {
+    this.sseBuffer += this.utf8Decoder.end()
     let out = ''
 
     if (this.sseBuffer.length > 0) {
