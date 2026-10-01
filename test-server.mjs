@@ -150,6 +150,8 @@ async function startProxy(t, respond = () => ({ body: '{}' }), configOverrides =
           resolve({
             status: response.statusCode,
             headers: response.headers,
+            trailers: response.trailers,
+            rawTrailers: response.rawTrailers,
             body,
             text: body.toString('utf8'),
             json: () => JSON.parse(body.toString('utf8')),
@@ -279,8 +281,8 @@ const trailerCases = [
   ...providers.flatMap((provider) => [
     { name: 'unchanged body with checksum', provider, text: '架空 🧥', declared: 'Content-Digest' },
     { name: 'masked body rejects stale checksum', provider, text: email, declared: 'Content-Digest', rejected: true },
-    { name: 'reserialized whitespace rejects stale checksum', provider, text: 'test', pretty: true,
-      declared: 'Content-Digest', rejected: true },
+    { name: 'unchanged pretty JSON preserves checksum and bytes', provider, text: 'test', pretty: true,
+      declared: 'Content-Digest' },
     { name: 'masked body with undeclared trailer rejects stale checksum', provider, text: email, rejected: true },
     { name: 'masked body with declaration only still restores', provider, text: email,
       declared: 'Content-Digest', noActual: true },
@@ -337,7 +339,7 @@ for (const entry of trailerCases) {
     }, entry.method ?? 'POST', trailers)
     if (entry.rejected) {
       assert.equal(response.status, 400)
-      assert.deepEqual(response.json(), { error: 'Request trailers cannot be forwarded after transforming the body' })
+      assert.deepEqual(response.json(), { error: 'Request body validation metadata cannot be forwarded after transforming the body' })
       assert.equal(received.length, 0, 'a transformed body with trailers must never reach upstream')
     } else {
       assert.equal(response.status, 200, response.text)
@@ -364,6 +366,130 @@ for (const entry of trailerCases) {
     }
     assert.deepEqual(parserErrors, [])
   })
+}
+
+
+// Exercise metadata at both actual HTTP boundaries, including end-of-body fields.
+async function startMetadataUpstream(t, respond, config = {}) {
+  const calls = []
+  const upstream = createServer(async (req, res) => {
+    const chunks = []
+    for await (const chunk of req) chunks.push(chunk)
+    const call = { body: Buffer.concat(chunks), headers: req.headers, rawTrailers: req.rawTrailers }
+    calls.push(call)
+    respond(call, res)
+  })
+  t.after(async () => {
+    upstream.closeAllConnections()
+    await new Promise((resolve) => upstream.close(resolve))
+  })
+  await new Promise((resolve, reject) => {
+    upstream.once('error', reject)
+    upstream.listen(0, '127.0.0.1', resolve)
+  })
+  const { send } = await startProxy(t, undefined, config, (url, options, callback) => {
+    const target = new URL(url)
+    return request(`http://127.0.0.1:${upstream.address().port}${target.pathname}${target.search}`, options, callback)
+  })
+  return { send, calls }
+}
+const validationNames = ['Content-Digest', 'Repr-Digest', 'Digest', 'Content-MD5', 'ETag', 'Signature', 'Signature-Input']
+const validationFields = (body) => Object.fromEntries(validationNames.map((name) => [name,
+  name.includes('Digest') ? contentDigest(body) : name === 'ETag' ? '"upstream-v1"' : 'upstream-attestation']))
+for (const provider of providers) {
+  for (const kind of ['ordinary trailers', ...validationNames.map((name) => 'validation header ' + name), 'preferences and preconditions', 'disabled pretty JSON']) {
+    test(`${provider.name} request metadata: ${kind}`, async (t) => {
+      const disabled = kind === 'disabled pretty JSON'
+      const input = JSON.stringify(requestBody(), null, disabled ? 2 : undefined)
+      const { send, calls } = await startMetadataUpstream(t, (call, res) => {
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify(provider.response(JSON.parse(call.body).messages[0].content)))
+      }, disabled ? { enabled: false } : {})
+      const trailers = kind === 'ordinary trailers' ? [['X-Note', 'first'], ['X-Note', 'second'], ['Server-Timing', 'mock;dur=1']] : undefined
+      const headers = trailers ? { 'transfer-encoding': 'chunked', trailer: 'X-Note, Server-Timing' }
+        : kind.startsWith('validation header ') ? { [kind.slice('validation header '.length)]: validationFields(input)[kind.slice('validation header '.length)] }
+          : disabled ? validationFields(input)
+          : { 'if-match': '"resource-v1"', 'if-none-match': '"resource-v0"', 'want-content-digest': 'sha-256=10', 'want-repr-digest': 'sha-256=10' }
+      const response = await send(provider.path, input, headers, 'POST', trailers)
+      if (kind.startsWith('validation header ')) {
+        assert.equal(response.status, 400)
+        assert.equal(calls.length, 0)
+      } else {
+        assert.equal(response.status, 200, response.text)
+        assert.equal(provider.text(response.json()), email)
+        assert.equal(calls.length, 1)
+        if (disabled) {
+          assert.equal(calls[0].body.toString(), input)
+          for (const [name, value] of Object.entries(headers)) assert.equal(calls[0].headers[name.toLowerCase()], value)
+        } else {
+          assert.ok(!calls[0].body.includes(Buffer.from(email)))
+          if (trailers) assert.deepEqual(calls[0].rawTrailers, trailers.flat())
+          else for (const [name, value] of Object.entries(headers)) assert.equal(calls[0].headers[name], value)
+        }
+      }
+    })
+  }
+}
+for (const provider of [passThrough, ...providers]) {
+  const modes = provider.response
+    ? ['pretty JSON fixed', 'binary trailers', 'restored JSON headers', 'restored JSON trailers', 'unchanged SSE', 'restored SSE', 'restored SSE flush', 'active unchanged SSE', 'empty 204', 'empty 304', 'empty 204 SSE', 'empty 304 SSE']
+    : ['pretty JSON fixed', 'binary trailers', 'unchanged SSE']
+  for (const mode of modes) {
+    test(`${provider.name} response metadata: ${mode}`, async (t) => {
+      const streaming = mode.includes('SSE')
+      const changed = mode.startsWith('restored')
+      const active = changed || mode === 'active unchanged SSE'
+      let original
+      const { send } = await startMetadataUpstream(t, (call, res) => {
+        const text = provider.response && active ? JSON.parse(call.body).messages[0].content : '架空 🧥'
+        original = mode === 'binary trailers' ? Buffer.from([0, 255, 128, 65])
+          : mode.startsWith('empty ') ? Buffer.alloc(0)
+          : streaming ? Buffer.from(mode === 'active unchanged SSE' ? provider.terminal
+            : provider.delta ? mode === 'restored SSE flush' ? provider.delta(text).trimEnd() : provider.delta(text) + provider.terminal : 'data: raw 🧥\r\n\r\n')
+          : Buffer.from(JSON.stringify(provider.response ? provider.response(text) : { text }, null, changed ? undefined : 2))
+        const trailers = mode.includes('trailers') || streaming && !mode.startsWith('empty ')
+        const headers = {
+          'Content-Type': mode === 'binary trailers' ? 'application/octet-stream' : streaming ? 'text/event-stream' : 'application/json',
+          'X-Note': 'response-metadata', 'Server-Timing': 'mock;dur=1',
+          ...validationFields(original),
+          ...(trailers ? { 'Transfer-Encoding': 'chunked', Trailer: validationNames.join(', ') + ', X-Note' }
+            : mode.startsWith('empty ') ? {} : { 'Content-Length': original.length }),
+        }
+        res.writeHead(mode.startsWith('empty ') ? Number(mode.split(' ')[1]) : 200, headers)
+        if (trailers) {
+          const split = Math.floor(original.length / 2)
+          res.write(original.subarray(0, split))
+          res.write(original.subarray(split))
+          res.addTrailers([...Object.entries(validationFields(original)), ['X-Note', 'first'], ['X-Note', 'second']])
+          res.end()
+        } else res.end(original)
+      })
+      const response = await send(provider.path, { ...requestBody(streaming && !!provider.response), messages: [{ role: 'user', content: mode === 'unchanged SSE' ? '架空 🧥' : email }] }, {})
+      // No PII in requests that exercise a provably unchanged SSE.
+      // For other unchanged bodies the request may still create a mapping.
+      assert.equal(response.status, mode.startsWith('empty ') ? Number(mode.split(' ')[1]) : 200)
+      assert.equal(response.headers['x-note'], 'response-metadata')
+      assert.equal(response.headers['server-timing'], 'mock;dur=1')
+      if (changed) {
+        assert.ok(response.text.includes(email))
+        assert.ok(!response.body.equals(original))
+      } else assert.deepEqual(response.body, original)
+      // Active SSE cannot know its final bytes before sending initial headers.
+      const potential = streaming && !!provider.response && mode !== 'unchanged SSE' && !mode.startsWith('empty ')
+      for (const name of validationNames) {
+        assert.equal(response.headers[name.toLowerCase()], changed || potential ? undefined : validationFields(original)[name])
+        if (mode.includes('trailers') || streaming && !mode.startsWith('empty ')) {
+          assert.equal(response.trailers[name.toLowerCase()], changed ? undefined : validationFields(original)[name])
+        }
+      }
+      if (mode.includes('trailers') || streaming && !mode.startsWith('empty ')) {
+        assert.deepEqual(response.rawTrailers.filter((_, i) => i % 2 === 0 && response.rawTrailers[i].toLowerCase() === 'x-note').length, 2)
+        assert.equal(response.trailers['x-note'], 'first, second')
+        if (changed && !streaming) assert.equal(response.headers.trailer, 'X-Note')
+      } else if (!changed && !mode.startsWith('empty ')) assert.equal(Number(response.headers['content-length']), original.length)
+      if (changed) assert.equal(response.headers['content-length'], undefined)
+    })
+  }
 }
 
 test('health, control, and analyze remain local HTTP endpoints', async (t) => {

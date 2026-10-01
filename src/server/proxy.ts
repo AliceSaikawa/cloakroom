@@ -1,10 +1,11 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { createHash } from 'node:crypto'
 import type { request as httpsRequest } from 'node:https'
 import type { ApiAdapter } from '../api/types.js'
 import { restoreNonStreamingResponse } from '../api/shared/responseRestorer.js'
 import { BlockedByPolicyError } from '../core/piiFilter.js'
 import { incMaskedRequests, incPassthroughRequests } from '../core/stats.js'
-import { getRequestTrailers, normalizeUpstreamHeaders, readBody, writeJson, writeUpstreamResponseHeaders } from './httpUtils.js'
+import { getMessageTrailers, hasBodyValidationMetadata, responseTrailers, normalizeUpstreamHeaders, readBody, writeJson, writeUpstreamResponseHeaders } from './httpUtils.js'
 import { resolveProvider } from './provider.js'
 import type { SessionFilterStore } from './sessionFilterStore.js'
 
@@ -14,7 +15,7 @@ export async function proxyPassThrough(
   requestUpstream: typeof httpsRequest,
 ): Promise<void> {
   const body = await readBody(req)
-  const trailers = getRequestTrailers(req)
+  const trailers = getMessageTrailers(req)
   const provider = resolveProvider(req)
   incPassthroughRequests(req.url?.split('?')[0] ?? '/')
   const headers = normalizeUpstreamHeaders(req.headers, provider.host, body.length, trailers)
@@ -28,8 +29,13 @@ export async function proxyPassThrough(
       },
       (upstreamRes) => {
         writeUpstreamResponseHeaders(upstreamRes, res)
-        upstreamRes.pipe(res)
-        upstreamRes.on('end', resolve)
+        upstreamRes.pipe(res, { end: false })
+        upstreamRes.on('end', () => {
+          const trailers = responseTrailers(upstreamRes, false)
+          if (trailers.length) res.addTrailers(trailers)
+          res.end()
+          resolve()
+        })
         upstreamRes.on('error', reject)
       },
     )
@@ -49,7 +55,7 @@ export async function proxyFilteredRequest(
   requestUpstream: typeof httpsRequest,
 ): Promise<void> {
   const rawBody = await readBody(req)
-  const trailers = getRequestTrailers(req)
+  const trailers = getMessageTrailers(req)
 
   let parsedBody: Record<string, unknown>
   try {
@@ -67,6 +73,7 @@ export async function proxyFilteredRequest(
   // to the active keep-alive socket.
   const filter = sessionFilters.acquire(req)
 
+  const originalJson = JSON.stringify(parsedBody)
   let filteredBody: Record<string, unknown>
   try {
     filteredBody = await adapter.filterRequest(parsedBody, filter)
@@ -84,11 +91,10 @@ export async function proxyFilteredRequest(
     throw err
   }
 
-  const outgoingBody = Buffer.from(JSON.stringify(filteredBody), 'utf8')
-  // Trailers may attest to the exact content (checksums/signatures). We cannot
-  // preserve their meaning after masking or even JSON whitespace normalization.
-  if (trailers.length > 0 && !outgoingBody.equals(rawBody)) {
-    writeJson(res, 400, { error: 'Request trailers cannot be forwarded after transforming the body' })
+  const filteredJson = JSON.stringify(filteredBody)
+  const outgoingBody = filteredJson === originalJson ? rawBody : Buffer.from(filteredJson, 'utf8')
+  if (!outgoingBody.equals(rawBody) && hasBodyValidationMetadata(req.headers, trailers)) {
+    writeJson(res, 400, { error: 'Request body validation metadata cannot be forwarded after transforming the body' })
     return
   }
   if (filter.isEnabled()) incMaskedRequests()
@@ -103,19 +109,42 @@ export async function proxyFilteredRequest(
       },
       (upstreamRes) => {
         const isSSE = (upstreamRes.headers['content-type'] ?? '').includes('text/event-stream')
-        writeUpstreamResponseHeaders(upstreamRes, res)
-
         if (parsedBody['stream'] === true && isSSE) {
+          const context = filter.getStreamRestorationContext()
+          const hasBody = upstreamRes.statusCode !== 204 && upstreamRes.statusCode !== 304
+          const canRestore = hasBody && (context.mappingTable.getLongestPlaceholderLength() > 0 || !!context.restoreEncodedText)
+          writeUpstreamResponseHeaders(upstreamRes, res, canRestore, true)
+          if (!canRestore) {
+            upstreamRes.pipe(res, { end: false })
+            upstreamRes.on('end', () => {
+              const trailers = responseTrailers(upstreamRes, false)
+              if (trailers.length) res.addTrailers(trailers)
+              res.end()
+              resolve()
+            })
+            upstreamRes.on('error', reject)
+            return
+          }
           const streamRestorer = adapter.createStreamRestorer(filter)
+          const originalHash = createHash('sha256')
+          const restoredHash = createHash('sha256')
+          const writeRestored = (text: string) => {
+            if (text) {
+              restoredHash.update(text, 'utf8')
+              res.write(text)
+            }
+          }
 
           upstreamRes.on('data', (chunk: Buffer) => {
-            const restored = streamRestorer.processChunk(chunk)
-            if (restored) res.write(restored)
+            originalHash.update(chunk)
+            writeRestored(streamRestorer.processChunk(chunk))
           })
 
           upstreamRes.on('end', () => {
-            const tail = streamRestorer.flush()
-            if (tail) res.write(tail)
+            writeRestored(streamRestorer.flush())
+            const changed = !originalHash.digest().equals(restoredHash.digest())
+            const trailers = responseTrailers(upstreamRes, changed)
+            if (trailers.length) res.addTrailers(trailers)
             res.end()
             resolve()
           })
@@ -131,11 +160,16 @@ export async function proxyFilteredRequest(
 
         upstreamRes.on('end', () => {
           const contentType = String(upstreamRes.headers['content-type'] ?? '')
+          const original = Buffer.concat(responseChunks)
           const restored = restoreNonStreamingResponse(
-            Buffer.concat(responseChunks),
+            original,
             contentType,
             filter,
           )
+          const changed = !Buffer.from(restored).equals(original)
+          writeUpstreamResponseHeaders(upstreamRes, res, changed)
+          const trailers = responseTrailers(upstreamRes, changed)
+          if (trailers.length) res.addTrailers(trailers)
           // Response-side PII detection (warn only, non-blocking)
           if (filter.isEnabled()) {
             const responseText = typeof restored === 'string' ? restored : restored.toString('utf8')
