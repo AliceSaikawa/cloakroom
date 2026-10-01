@@ -24,6 +24,7 @@ export class OpenAIStreamRestorer {
   }
 
   processChunk(chunk: Buffer | string): string {
+    if (chunk.length === 0) return ''
     this.sseBuffer += typeof chunk === 'string'
       ? this.utf8Decoder.end() + chunk
       : this.utf8Decoder.write(chunk)
