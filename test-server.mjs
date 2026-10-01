@@ -217,6 +217,41 @@ test('health, control, and analyze remain local HTTP endpoints', async (t) => {
   assert.equal(calls.length, 0)
 })
 
+test('analyze rejects non-object JSON values before upstream contact', async (t) => {
+  const { calls, send } = await startProxy(t)
+  for (const value of [null, true, false, 0, '', 'text', [], [{ text: email }]]) {
+    const response = await send('/analyze', JSON.stringify(value))
+    assert.equal(response.status, 400, `input: ${JSON.stringify(value)}`)
+    assert.deepEqual(response.json(), { error: 'Expected JSON body with a string "text" field' })
+  }
+  assert.equal(calls.length, 0)
+  assert.equal((await send('/health')).status, 200)
+})
+
+test('analyze rejects objects without a string text field', async (t) => {
+  const { calls, send } = await startProxy(t)
+  for (const value of [{}, { text: null }, { text: 42 }, { text: true }, { text: [] }, { text: {} }]) {
+    const response = await send('/analyze', value)
+    assert.equal(response.status, 400, `input: ${JSON.stringify(value)}`)
+    assert.deepEqual(response.json(), { error: 'Expected JSON body with a string "text" field' })
+  }
+  assert.equal(calls.length, 0)
+})
+
+test('analyze accepts empty and Unicode text and keeps detection local', async (t) => {
+  const { calls, send } = await startProxy(t)
+  for (const text of ['', '架空のメモ 🧥', `連絡先: ${email}`]) {
+    const response = await send('/analyze', { text, useOllama: false })
+    assert.equal(response.status, 200)
+    if (text.includes(email)) {
+      assert.ok(response.json().detections.some((match) => match.category === 'EMAIL' && match.text === email))
+    } else {
+      assert.deepEqual(response.json(), { detections: [] })
+    }
+  }
+  assert.equal(calls.length, 0)
+})
+
 test('invalid JSON and oversized bodies are rejected before upstream contact', async (t) => {
   const { calls, send } = await startProxy(t)
   for (const path of ['/analyze', ...providers.map((provider) => provider.path)]) {
