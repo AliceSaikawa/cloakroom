@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { request } from 'node:http'
+import { createServer, request } from 'node:http'
 import { dirname } from 'node:path'
 import { Readable } from 'node:stream'
 import { test } from 'node:test'
@@ -100,14 +100,14 @@ function fakeUpstream(respond, calls) {
   }
 }
 
-async function startProxy(t, respond = () => ({ body: '{}' }), configOverrides = {}) {
+async function startProxy(t, respond = () => ({ body: '{}' }), configOverrides = {}, requestUpstream) {
   resetControlState()
   resetStats()
   const calls = []
   const sessionFilters = new SessionFilterStore({ ...getTestConfig(), ...configOverrides })
   const server = createProxyServer({
     sessionFilters,
-    requestUpstream: fakeUpstream(respond, calls),
+    requestUpstream: requestUpstream ?? fakeUpstream(respond, calls),
   })
   assert.equal(server.listening, false, 'creating a server must not bind a port')
   t.after(async () => {
@@ -134,7 +134,10 @@ async function startProxy(t, respond = () => ({ body: '{}' }), configOverrides =
         method,
         agent: false,
         headers: {
-          ...(bytes ? { 'content-type': 'application/json', 'content-length': bytes.length } : {}),
+          ...(bytes ? {
+            'content-type': 'application/json',
+            ...(headers['transfer-encoding'] ? {} : { 'content-length': bytes.length }),
+          } : {}),
           ...headers,
         },
       }, (response) => {
@@ -154,7 +157,13 @@ async function startProxy(t, respond = () => ({ body: '{}' }), configOverrides =
       })
       client.on('error', reject)
       client.setTimeout(3000, () => client.destroy(new Error('Local proxy test timed out')))
-      client.end(bytes)
+      if (bytes && headers['transfer-encoding'] === 'chunked') {
+        const split = Math.floor(bytes.length / 2)
+        client.write(bytes.subarray(0, split))
+        client.end(bytes.subarray(split))
+      } else {
+        client.end(bytes)
+      }
     })
   }
 
@@ -193,6 +202,60 @@ const providers = [
     streamText: (event) => event.choices?.[0]?.delta?.content ?? '',
   },
 ]
+
+// Use a real HTTP parser upstream: the in-memory mock cannot reject conflicting
+// Content-Length / Transfer-Encoding headers on the proxy's outgoing request.
+for (const provider of [...providers, { name: 'Pass-through', path: '/v1/unknown?chunked=1' }]) {
+  for (const chunked of [true, false]) {
+    test(`${provider.name} forwards ${chunked ? 'chunked' : 'fixed-length'} bodies with valid upstream framing`, async (t) => {
+      const received = []
+      const parserErrors = []
+      const upstream = createServer(async (req, res) => {
+        const chunks = []
+        for await (const chunk of req) chunks.push(chunk)
+        const body = Buffer.concat(chunks)
+        received.push({ headers: req.headers, body })
+        const parsed = JSON.parse(body.toString('utf8'))
+        const response = provider.response
+          ? provider.response(parsed.messages[0].content)
+          : parsed
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(response))
+      })
+      upstream.on('clientError', (error, socket) => {
+        parserErrors.push(error.code)
+        socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+      })
+      t.after(async () => {
+        upstream.closeAllConnections()
+        await new Promise((resolve) => upstream.close(resolve))
+      })
+      await new Promise((resolve, reject) => {
+        upstream.once('error', reject)
+        upstream.listen(0, '127.0.0.1', resolve)
+      })
+      const requestRealUpstream = (url, options, callback) => {
+        const target = new URL(url)
+        return request(`http://127.0.0.1:${upstream.address().port}${target.pathname}${target.search}`, options, callback)
+      }
+      const { send } = await startProxy(t, undefined, {}, requestRealUpstream)
+      const body = provider.response ? requestBody() : { input: email }
+      const response = await send(provider.path, body, chunked ? { 'transfer-encoding': 'chunked' } : {})
+      assert.equal(response.status, 200, `upstream parser errors: ${parserErrors.join(', ')}`)
+      assert.deepEqual(parserErrors, [])
+      assert.equal(received.length, 1)
+      assert.equal(received[0].headers['transfer-encoding'], undefined)
+      assert.equal(Number(received[0].headers['content-length']), received[0].body.length)
+      if (provider.response) {
+        assert.ok(!received[0].body.includes(Buffer.from(email)))
+        assert.equal(provider.text(response.json()), email)
+      } else {
+        assert.deepEqual(JSON.parse(received[0].body.toString('utf8')), body)
+        assert.deepEqual(response.json(), body)
+      }
+    })
+  }
+}
 
 test('health, control, and analyze remain local HTTP endpoints', async (t) => {
   const { calls, send } = await startProxy(t)

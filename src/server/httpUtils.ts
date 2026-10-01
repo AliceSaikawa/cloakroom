@@ -76,6 +76,9 @@ export function normalizeUpstreamHeaders(
 
   out['host'] = host
   delete out['accept-encoding']
+  // The incoming body has been decoded and buffered. Let the new request use
+  // its own framing instead of combining the client's chunking with our length.
+  delete out['transfer-encoding']
   if (bodyLength !== undefined) {
     out['content-length'] = String(bodyLength)
   } else {
