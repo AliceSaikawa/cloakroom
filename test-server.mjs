@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { createServer, request } from 'node:http'
 import { dirname } from 'node:path'
@@ -122,7 +123,7 @@ async function startProxy(t, respond = () => ({ body: '{}' }), configOverrides =
     server.listen(0, '127.0.0.1', resolve)
   })
 
-  function send(path, body, headers = {}, method = body === undefined ? 'GET' : 'POST') {
+  function send(path, body, headers = {}, method = body === undefined ? 'GET' : 'POST', trailers) {
     const bytes = body === undefined ? undefined
       : Buffer.isBuffer(body) ? body
         : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))
@@ -160,7 +161,9 @@ async function startProxy(t, respond = () => ({ body: '{}' }), configOverrides =
       if (bytes && headers['transfer-encoding'] === 'chunked') {
         const split = Math.floor(bytes.length / 2)
         client.write(bytes.subarray(0, split))
-        client.end(bytes.subarray(split))
+        client.write(bytes.subarray(split))
+        if (trailers !== undefined) client.addTrailers(trailers)
+        client.end()
       } else {
         client.end(bytes)
       }
@@ -255,6 +258,112 @@ for (const provider of [...providers, { name: 'Pass-through', path: '/v1/unknown
       }
     })
   }
+}
+
+const contentDigest = (body) => `sha-256=:${createHash('sha256').update(body).digest('base64')}:`
+const passThrough = { name: 'Pass-through', path: '/v1/unknown?trailers=1' }
+const trailerCases = [
+  { name: 'declared checksum and repeated metadata', provider: passThrough, text: '架空 🧥',
+    declared: 'Content-Digest, X-Note', repeated: true },
+  { name: 'undeclared actual trailers', provider: passThrough, text: '架空 🧥' },
+  { name: 'declaration without actual trailers', provider: passThrough, text: email,
+    declared: 'Content-Digest', noActual: true },
+  { name: 'empty GET body with actual trailer', provider: passThrough, empty: true, method: 'GET',
+    declared: 'Content-Digest' },
+  { name: 'empty-valued metadata', provider: passThrough, text: 'test',
+    declared: 'Content-Digest, X-Note', emptyValue: true },
+  { name: 'empty declaration without actual trailers', provider: passThrough, text: 'test',
+    declared: '', noActual: true, emptyDeclaration: true },
+  { name: 'ignored empty declaration elements', provider: passThrough, text: 'test',
+    declared: ', ', noActual: true, emptyDeclaration: true },
+  ...providers.flatMap((provider) => [
+    { name: 'unchanged body with checksum', provider, text: '架空 🧥', declared: 'Content-Digest' },
+    { name: 'masked body rejects stale checksum', provider, text: email, declared: 'Content-Digest', rejected: true },
+    { name: 'reserialized whitespace rejects stale checksum', provider, text: 'test', pretty: true,
+      declared: 'Content-Digest', rejected: true },
+    { name: 'masked body with undeclared trailer rejects stale checksum', provider, text: email, rejected: true },
+    { name: 'masked body with declaration only still restores', provider, text: email,
+      declared: 'Content-Digest', noActual: true },
+    { name: 'disabled filter with unchanged body preserves checksum', provider, text: email,
+      declared: 'Content-Digest', disabled: true },
+  ]),
+]
+
+for (const entry of trailerCases) {
+  test(`${entry.provider.name} trailers: ${entry.name}`, async (t) => {
+    const received = []
+    const parserErrors = []
+    const original = entry.empty ? '' : JSON.stringify({
+      model: 'test-model', messages: [{ role: 'user', content: entry.text }],
+    }, null, entry.pretty ? 2 : undefined)
+    const trailers = entry.noActual ? undefined : [
+      ['Content-Digest', contentDigest(original)],
+      ...(entry.repeated ? [['X-Note', 'first'], ['X-Note', 'second']] : []),
+      ...(entry.emptyValue ? [['X-Note', '']] : []),
+    ]
+    const upstream = createServer(async (req, res) => {
+      const chunks = []
+      for await (const chunk of req) chunks.push(chunk)
+      const body = Buffer.concat(chunks)
+      received.push({ headers: req.headers, trailers: req.trailers, rawTrailers: req.rawTrailers, body })
+      // Verify a real content checksum, rather than accepting stale metadata.
+      if (req.trailers['content-digest'] && req.trailers['content-digest'] !== contentDigest(body)) {
+        res.writeHead(422); res.end('Content-Digest mismatch'); return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(entry.provider.response
+        ? JSON.stringify(entry.provider.response(JSON.parse(body.toString('utf8')).messages[0].content))
+        : body)
+    })
+    upstream.on('clientError', (error, socket) => {
+      parserErrors.push(error.code)
+      socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+    })
+    t.after(async () => {
+      upstream.closeAllConnections()
+      await new Promise((resolve) => upstream.close(resolve))
+    })
+    await new Promise((resolve, reject) => {
+      upstream.once('error', reject)
+      upstream.listen(0, '127.0.0.1', resolve)
+    })
+    const requestRealUpstream = (url, options, callback) => {
+      const target = new URL(url)
+      return request(`http://127.0.0.1:${upstream.address().port}${target.pathname}${target.search}`, options, callback)
+    }
+    const { send } = await startProxy(t, undefined, entry.disabled ? { enabled: false } : {}, requestRealUpstream)
+    const response = await send(entry.provider.path, original, {
+      'transfer-encoding': 'chunked', ...(entry.declared !== undefined ? { trailer: entry.declared } : {}),
+    }, entry.method ?? 'POST', trailers)
+    if (entry.rejected) {
+      assert.equal(response.status, 400)
+      assert.deepEqual(response.json(), { error: 'Request trailers cannot be forwarded after transforming the body' })
+      assert.equal(received.length, 0, 'a transformed body with trailers must never reach upstream')
+    } else {
+      assert.equal(response.status, 200, response.text)
+      assert.equal(received.length, 1)
+      const sent = received[0]
+      if (entry.emptyDeclaration) {
+        assert.equal(Number(sent.headers['content-length']), sent.body.length)
+        assert.equal(sent.headers['transfer-encoding'], undefined)
+        assert.equal(sent.headers.trailer, undefined)
+      } else {
+        assert.equal(sent.headers['content-length'], undefined)
+        assert.equal(sent.headers['transfer-encoding'], 'chunked')
+        assert.ok(sent.headers.trailer.toLowerCase().split(',').map((name) => name.trim()).includes('content-digest'))
+      }
+      assert.deepEqual(sent.rawTrailers, trailers?.flat() ?? [], 'preserve duplicate fields, order, case and values')
+      if (entry.provider.response) {
+        assert.equal(entry.provider.text(response.json()), entry.text)
+        if (entry.noActual) assert.ok(!sent.body.includes(Buffer.from(email)), 'declaration-only input must still be masked')
+        else assert.equal(sent.body.toString('utf8'), original)
+      } else {
+        assert.equal(sent.body.toString('utf8'), original)
+        assert.equal(response.text, original)
+      }
+    }
+    assert.deepEqual(parserErrors, [])
+  })
 }
 
 test('health, control, and analyze remain local HTTP endpoints', async (t) => {

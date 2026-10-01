@@ -220,6 +220,7 @@ See the [architecture guide (Japanese)](docs/architecture.md) for the processing
 
 ## Limitations
 
+- Actual HTTP request trailers are preserved when the body can be forwarded byte-for-byte. On filtered routes, if masking or JSON reserialization changes the body and actual trailers were received, the proxy returns an explanatory 400 before contacting upstream rather than invalidating checksums or signatures. A `Trailer` declaration without actual trailing fields still allows normal masking and restoration.
 - Heuristic NER is an approximate detector based on static surname/legal-entity/school-suffix dictionaries; surnames outside the dictionary, uncommon organization or school names, and unlisted romaji spellings can be missed. For higher accuracy, combine it with `ollamaEnabled: true` or register known values explicitly in `dictionary` / `customPatterns`
 - Neither heuristic NER nor Ollama detection applies to the system prompt (the `system` field only goes through dictionary and regex filtering)
 - Ollama's 4B model is not perfectly accurate for name/org/school detection; false positives and misses can occur. Detection has a timeout budget of roughly 4 seconds and adds latency per new content block

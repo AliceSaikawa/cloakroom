@@ -4,7 +4,7 @@ import type { ApiAdapter } from '../api/types.js'
 import { restoreNonStreamingResponse } from '../api/shared/responseRestorer.js'
 import { BlockedByPolicyError } from '../core/piiFilter.js'
 import { incMaskedRequests, incPassthroughRequests } from '../core/stats.js'
-import { normalizeUpstreamHeaders, readBody, writeJson, writeUpstreamResponseHeaders } from './httpUtils.js'
+import { getRequestTrailers, normalizeUpstreamHeaders, readBody, writeJson, writeUpstreamResponseHeaders } from './httpUtils.js'
 import { resolveProvider } from './provider.js'
 import type { SessionFilterStore } from './sessionFilterStore.js'
 
@@ -14,9 +14,10 @@ export async function proxyPassThrough(
   requestUpstream: typeof httpsRequest,
 ): Promise<void> {
   const body = await readBody(req)
+  const trailers = getRequestTrailers(req)
   const provider = resolveProvider(req)
   incPassthroughRequests(req.url?.split('?')[0] ?? '/')
-  const headers = normalizeUpstreamHeaders(req.headers, provider.host, body.length)
+  const headers = normalizeUpstreamHeaders(req.headers, provider.host, body.length, trailers)
 
   await new Promise<void>((resolve, reject) => {
     const upstream = requestUpstream(
@@ -35,6 +36,7 @@ export async function proxyPassThrough(
 
     upstream.on('error', reject)
     upstream.write(body)
+    if (trailers.length > 0) upstream.addTrailers(trailers)
     upstream.end()
   })
 }
@@ -47,6 +49,7 @@ export async function proxyFilteredRequest(
   requestUpstream: typeof httpsRequest,
 ): Promise<void> {
   const rawBody = await readBody(req)
+  const trailers = getRequestTrailers(req)
 
   let parsedBody: Record<string, unknown>
   try {
@@ -81,9 +84,15 @@ export async function proxyFilteredRequest(
     throw err
   }
 
-  if (filter.isEnabled()) incMaskedRequests()
   const outgoingBody = Buffer.from(JSON.stringify(filteredBody), 'utf8')
-  const headers = normalizeUpstreamHeaders(req.headers, provider.host, outgoingBody.length)
+  // Trailers may attest to the exact content (checksums/signatures). We cannot
+  // preserve their meaning after masking or even JSON whitespace normalization.
+  if (trailers.length > 0 && !outgoingBody.equals(rawBody)) {
+    writeJson(res, 400, { error: 'Request trailers cannot be forwarded after transforming the body' })
+    return
+  }
+  if (filter.isEnabled()) incMaskedRequests()
+  const headers = normalizeUpstreamHeaders(req.headers, provider.host, outgoingBody.length, trailers)
 
   await new Promise<void>((resolve, reject) => {
     const upstream = requestUpstream(
@@ -142,6 +151,7 @@ export async function proxyFilteredRequest(
 
     upstream.on('error', reject)
     upstream.write(outgoingBody)
+    if (trailers.length > 0) upstream.addTrailers(trailers)
     upstream.end()
   })
 }

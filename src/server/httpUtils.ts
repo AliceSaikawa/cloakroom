@@ -33,6 +33,15 @@ export function readBody(req: IncomingMessage): Promise<Buffer> {
   return readRequestBody(req, loadPIIConfig().maxRequestBodyBytes)
 }
 
+// Read only after the request body's end event. Keep repeated fields separate.
+export function getRequestTrailers(req: IncomingMessage): [string, string][] {
+  const trailers: [string, string][] = []
+  for (let i = 0; i < req.rawTrailers.length; i += 2) {
+    trailers.push([req.rawTrailers[i], req.rawTrailers[i + 1]])
+  }
+  return trailers
+}
+
 export function writeUpstreamResponseHeaders(upstream: IncomingMessage, res: ServerResponse): void {
   const statusCode = upstream.statusCode ?? 502
   const headers = { ...upstream.headers }
@@ -62,6 +71,7 @@ export function normalizeUpstreamHeaders(
   headers: IncomingMessage['headers'],
   host: string,
   bodyLength?: number,
+  trailers: readonly [string, string][] = [],
 ): Record<string, string> {
   const out: Record<string, string> = {}
 
@@ -79,10 +89,21 @@ export function normalizeUpstreamHeaders(
   // The incoming body has been decoded and buffered. Let the new request use
   // its own framing instead of combining the client's chunking with our length.
   delete out['transfer-encoding']
-  if (bodyLength !== undefined) {
-    out['content-length'] = String(bodyLength)
-  } else {
+  const trailerNames = new Set(
+    (out['trailer'] ?? '').split(',').map((name) => name.trim().toLowerCase()).filter(Boolean),
+  )
+  for (const [name] of trailers) trailerNames.add(name.toLowerCase())
+
+  if (trailerNames.size > 0) {
+    // HTTP/1.1 trailers need chunked framing, including empty and GET bodies.
+    out['trailer'] = [...trailerNames].join(', ')
+    out['transfer-encoding'] = 'chunked'
     delete out['content-length']
+  } else {
+    // An empty declaration promises no fields; it must not conflict with length framing.
+    delete out['trailer']
+    if (bodyLength !== undefined) out['content-length'] = String(bodyLength)
+    else delete out['content-length']
   }
 
   return out
