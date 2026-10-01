@@ -5,22 +5,25 @@ import { readBody, writeJson } from './httpUtils.js'
 export async function handleAnalyze(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const rawBody = await readBody(req)
 
-  let parsedBody: Record<string, unknown>
+  let parsedBody: unknown
   try {
-    parsedBody = JSON.parse(rawBody.toString('utf8')) as Record<string, unknown>
+    parsedBody = JSON.parse(rawBody.toString('utf8'))
   } catch {
     writeJson(res, 400, { error: 'Invalid JSON body' })
     return
   }
 
-  if (typeof parsedBody['text'] !== 'string') {
+  if (
+    parsedBody === null || typeof parsedBody !== 'object' || Array.isArray(parsedBody)
+    || !('text' in parsedBody) || typeof parsedBody.text !== 'string'
+  ) {
     writeJson(res, 400, { error: 'Expected JSON body with a string "text" field' })
     return
   }
 
   const filter = new PIIFilter()
-  const detections = await filter.analyzeText(parsedBody['text'], {
-    useOllama: parsedBody['useOllama'] === true,
+  const detections = await filter.analyzeText(parsedBody.text, {
+    useOllama: 'useOllama' in parsedBody && parsedBody.useOllama === true,
   })
 
   writeJson(res, 200, { detections })
