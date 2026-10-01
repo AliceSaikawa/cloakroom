@@ -14,7 +14,8 @@ let maskedRequests = 0
 let restoredPlaceholders = 0
 let unresolvedPlaceholders = 0
 let passthroughRequests = 0
-const detectionsByCategory: Record<string, number> = {}
+// Custom category names must not resolve to inherited Object properties.
+const detectionsByCategory: Record<string, number> = Object.create(null)
 const passthroughByPath: Record<string, number> = {}
 
 export function incMaskedRequests(): void {
