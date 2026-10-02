@@ -44,7 +44,7 @@ Claude Code / API client
 - Detection happens in four stages: **dictionary (exact match) → regex → heuristic NER → Ollama LLM (optional)**. The heuristic NER stage (`heuristicNerEnabled`, defaults to `true`) is a zero-runtime-dependency stage that runs on a built-in surname dictionary, legal-entity suffixes, and school-name suffixes plus contextual rules; it only runs when `NAME` / `ORG` / `SCHOOL` is in the active category list. The Ollama LLM stage is an **optional accuracy-boosting stage**, disabled by default (`ollamaEnabled: false`); when enabled, it only handles the `NAME` / `ORG` / `SCHOOL` categories, and is skipped entirely if none of those are in the active category list.
 - Heuristic NER and Ollama detection are **not applied to the system prompt** (the `system` field is only filtered by dictionary and regex). Only user/assistant message content and tool results go through those stages.
 - Built-in placeholders use Japanese labels plus alphabetic counters (e.g. `[メールアドレスA]`, `[人名B]`). Counters continue from `A` through `Z`, then `AA`. The same original value always reuses the same placeholder. Values in `allowlist` are never masked.
-- The original-value ↔ placeholder mapping is kept **per session**. If a request carries `x-pii-session-id`, `anthropic-session-id`, or `x-session-id`, the mapping is tied to that ID (30-minute TTL); otherwise it lives only as long as the underlying TCP connection stays open. Sending `x-pii-session-reset: 1` discards that session's mapping.
+- The original-value ↔ placeholder mapping is kept **per provider and session**. If a request carries `x-pii-session-id`, `anthropic-session-id`, or `x-session-id`, the mapping is tied to that provider and ID (30-minute sliding TTL); otherwise it lives for that provider on the underlying TCP connection. Sending `x-pii-session-reset: 1` or `true` discards that provider/session mapping and its persisted Vault entry. Other providers and IDs do not share mappings.
 
 ## Setup
 
@@ -123,6 +123,10 @@ Config file: `~/.claude/pii-filter.json` (created by `cloakroom init`, overwritt
 | `dictionary` | `[]` | Known exact-match values ({`text`, `category`}). Evaluated before regex and Ollama |
 | `allowlist` | `[]` | Exact-match strings that are never masked, even if detected |
 | `categoryActions` | `{}` | Per-category action policy. Accepted values are `"mask"` (default: replace with placeholder), `"block"` (reject the request with `446 Request Rejected`), and `"warn"` (skip masking, write to audit log only). Example: `{"CREDIT_CARD": "block", "NAME": "warn"}` |
+
+`providerOverrides` accepts `enabled`, `categories`, and `categoryActions` for `anthropic` / `openai`. It applies at startup; `POST /control/reload` updates policy while preserving existing mappings. Each supplied property replaces the shared value, including the entire categories array or categoryActions object.
+
+With `vaultEnabled`, explicit-session mappings are saved in provider directories with SHA-256 session-ID filenames. Legacy shared Vault files have no provider identity and are not automatically loaded; new conversations must establish new mappings after upgrading. Existing files are not migrated or rewritten. This separation applies to MappingTable/Vault; the FPE key scheme is unchanged.
 
 Environment variables:
 
@@ -211,6 +215,8 @@ See the [architecture guide (Japanese)](docs/architecture.md) for the processing
 
 | Command | What it checks | Requires |
 |---|---|---|
+| `node test-provider-sessions.mjs` | Real JSON configuration and local HTTP: both providers, startup/reload, multi-turn restoration, isolation, and reset | No external API or API key |
+| `node test-session-vault.mjs` | Synthetic mappings and an isolated Vault: persistence, isolation, reset, TTL, and close | No external API or existing key |
 | `node test-server.mjs` | HTTP handling, masking, forwarding, and restoration against a local mock upstream | No external API connection or API key |
 | `node test-pii-filter.mjs` | Filter ON/OFF, bug regressions, provider routing, stream restoration, runtime control, heuristic NER | None (bundles source on the fly with esbuild) |
 | `node test-pii-filter.mjs --proxy` | Same as above, plus a scenario that hits a running proxy for real | A running proxy and `ANTHROPIC_API_KEY` set |

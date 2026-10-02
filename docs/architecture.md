@@ -258,9 +258,11 @@ TextDeltaRestorer.pending    閉じ括弧が来るまで溜める
 
 | 条件 | 紐付け先 | 寿命 |
 |---|---|---|
-| `x-pii-session-id` 等のヘッダあり | そのID | 30分（アクセスごとに延長） |
-| ヘッダなし | TCP ソケット | 接続が切れるまで |
-| `vaultEnabled: true` | 上に加えてディスク保存 | `vaultTtlMinutes` |
+| `x-pii-session-id` 等のヘッダあり | providerとそのID | 30分（アクセスごとに延長） |
+| ヘッダなし | providerとTCP ソケット | 接続が切れるまで |
+| `vaultEnabled: true` かつ明示IDあり | provider別ディレクトリ・IDのSHA-256名でディスク保存 | `vaultTtlMinutes` |
+
+メモリの30分TTLとディスクVaultのTTLは別々に扱う。resetは対象providerのメモリ・保存済み対応表を破棄する（Vaultを一時無効にしていても保存済みエントリを削除）。古い接続のcloseは、reset・clear・期限切れで置き換わった対応表を再保存しない。`activeSessionCount` はproviderとID/ソケットの組を数える。providerを特定できない旧共有Vaultは自動取り込み・移行しない。FPEの鍵方式は変更しない。
 
 **Claude Code はこのヘッダを送らない**ので、実際にはソケット寿命に依存している。ここが仕様レビュー A-2（→ #92）で指摘されている弱点。
 
@@ -269,6 +271,7 @@ TextDeltaRestorer.pending    閉じ括弧が来るまで溜める
 ## 8. 設定の読み込み（`core/config.ts`）
 
 - パス: `~/.claude/pii-filter.json`
+- 起動時から共通設定に `providerOverrides[provider]` を重ねる。`enabled` / `categories` / `categoryActions` はプロパティ単位の置換。reload時は各providerの既存フィルタへ有効設定を適用し、対応表は保持する
 - **プロセス内でキャッシュされる**（`loadedConfig`）。`reloadPIIConfig()` か `SIGHUP` か `POST /control/reload` を叩くまで再読み込みされない
 - ファイルが無い・壊れている場合は例外を握りつぶして `DEFAULT_CONFIG` にフォールバックする。**設定ミスが黙って無視される**ので、意図通り効いているかは `/control/status` で確認する
 - `CLAUDE_PII_FILTER=0` で全体を無効化できる
@@ -324,4 +327,4 @@ curl -s -X POST localhost:8787/analyze \
 
 `node test-server.mjs` はローカルのモック上流を使い、HTTP 受付からマスク・転送・復元までを検証する。API キーや外部 API 接続は不要。
 
-既存の `node test-pii-filter.mjs`、`node test-fpe.mjs`、`node test-benchmark.mjs` はコア機能と API 復元処理の回帰確認に使う。`npm test` で HTTP テストを含めた4つをまとめて実行できる。ビルドと型検査は、それぞれ `npm run build` と `npm run typecheck` で行う。
+既存の `node test-pii-filter.mjs`、`node test-fpe.mjs`、`node test-benchmark.mjs` はコア機能と API 復元処理の回帰確認に使う。`node test-provider-sessions.mjs` は実JSON設定とローカルHTTPでprovider別の起動・reload・会話継続・分離を、`node test-session-vault.mjs` は隔離Vaultで保存・reset・期限切れ・古いcloseを検証する。`npm test` でこれらを含めてまとめて実行できる。ビルドと型検査は、それぞれ `npm run build` と `npm run typecheck` で行う。

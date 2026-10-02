@@ -1,9 +1,10 @@
+import { loadPIIConfig } from '../core/config.js'
 import type { IncomingMessage } from 'node:http'
 import type { Socket } from 'node:net'
 import { readHeader } from './httpUtils.js'
 import { MappingTable } from '../core/mappingTable.js'
 import { PIIFilter } from '../core/piiFilter.js'
-import { resolveProvider } from './provider.js'
+import { resolveProvider, type ProviderKind } from './provider.js'
 import type { PIIFilterConfig } from '../core/types.js'
 import { cleanExpiredVaults, deleteSessionVault, loadSessionVault, saveSessionVault } from '../core/vault.js'
 
@@ -11,11 +12,14 @@ const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000
 const SESSION_ID_HEADERS = ['x-pii-session-id', 'anthropic-session-id', 'x-session-id'] as const
 const SESSION_RESET_HEADERS = ['x-pii-session-reset'] as const
 
-type SessionEntry = {
+type FilterEntry = {
+  readonly provider: ProviderKind
   readonly filter: PIIFilter
+}
+type SessionEntry = FilterEntry & {
+  readonly sessionId: string
   expiresAt: number
 }
-
 
 function shouldResetSession(req: IncomingMessage): boolean {
   const resetValue = readHeader(req, SESSION_RESET_HEADERS)?.toLowerCase()
@@ -24,111 +28,127 @@ function shouldResetSession(req: IncomingMessage): boolean {
 
 export class SessionFilterStore {
   private readonly explicitSessions = new Map<string, SessionEntry>()
-  private socketSessions = new WeakMap<Socket, PIIFilter>()
-  private socketFilters = new Set<PIIFilter>()
-  // Track which (socket, sessionId) pairs already have a vault-save listener
-  private readonly registeredSaveListeners = new WeakMap<Socket, Set<string>>()
+  private socketSessions = new WeakMap<Socket, Map<ProviderKind, FilterEntry>>()
+  private socketFilters = new Set<FilterEntry>()
+  private vaultRegistrations = new WeakMap<Socket, Map<string, SessionEntry>>()
 
-  constructor(private config?: PIIFilterConfig) {}
+  // Load the same initial configuration used by filters, before any reload.
+  constructor(private config: PIIFilterConfig = loadPIIConfig()) {}
+
+  private effectiveConfig(provider: ProviderKind): PIIFilterConfig {
+    return { ...this.config, ...this.config.providerOverrides?.[provider] }
+  }
 
   acquire(req: IncomingMessage): PIIFilter {
     this.pruneExpiredSessions()
-
-    // Apply provider-specific overrides when configured
-    const providerOverride = this.config?.providerOverrides?.[resolveProvider(req).kind]
-    if (providerOverride && this.config) {
-      const mergedConfig: PIIFilterConfig = { ...this.config, ...providerOverride }
-      return new PIIFilter(mergedConfig)
-    }
-
+    const provider = resolveProvider(req).kind
     const explicitSessionId = readHeader(req, SESSION_ID_HEADERS)
     if (explicitSessionId) {
+      // Tuple encoding avoids ambiguous IDs and does not depend on override presence.
+      const key = JSON.stringify([provider, explicitSessionId])
       if (shouldResetSession(req)) {
-        this.explicitSessions.delete(explicitSessionId)
-        if (this.config?.vaultEnabled) {
-          deleteSessionVault(explicitSessionId)
-        }
+        this.explicitSessions.delete(key)
+        // Reset also invalidates persisted mappings while vault use is disabled.
+        deleteSessionVault(explicitSessionId, provider)
       }
-      const filter = this.acquireExplicitSession(explicitSessionId)
-      if (this.config?.vaultEnabled) {
-        this.registerVaultSaveOnClose(req.socket, explicitSessionId, filter)
-      }
-      return filter
+      const entry = this.acquireExplicitSession(key, explicitSessionId, provider)
+      if (this.config.vaultEnabled) this.registerVaultSaveOnClose(req.socket, key, entry)
+      return entry.filter
     }
 
     if (shouldResetSession(req)) {
-      this.socketSessions.delete(req.socket)
+      const entries = this.socketSessions.get(req.socket)
+      const previous = entries?.get(provider)
+      if (previous) {
+        entries!.delete(provider)
+        this.socketFilters.delete(previous)
+      }
     }
-    return this.acquireSocketSession(req.socket)
+    return this.acquireSocketSession(req.socket, provider)
   }
 
   clear(): void {
     this.explicitSessions.clear()
-    this.socketSessions = new WeakMap<Socket, PIIFilter>()
+    this.socketSessions = new WeakMap()
     this.socketFilters.clear()
+    this.vaultRegistrations = new WeakMap()
   }
 
   reload(config: PIIFilterConfig): void {
     this.config = config
     this.pruneExpiredSessions()
     for (const entry of this.explicitSessions.values()) {
-      entry.filter.updateConfig(config)
+      entry.filter.updateConfig(this.effectiveConfig(entry.provider))
     }
-    for (const filter of this.socketFilters) {
-      filter.updateConfig(config)
+    for (const entry of this.socketFilters) {
+      entry.filter.updateConfig(this.effectiveConfig(entry.provider))
     }
   }
 
-  private acquireExplicitSession(sessionId: string): PIIFilter {
-    const existing = this.explicitSessions.get(sessionId)
+  private acquireExplicitSession(key: string, sessionId: string, provider: ProviderKind): SessionEntry {
+    const existing = this.explicitSessions.get(key)
     if (existing) {
       existing.expiresAt = Date.now() + DEFAULT_SESSION_TTL_MS
-      return existing.filter
+      return existing
     }
 
     let mappingTable: MappingTable | undefined
-    if (this.config?.vaultEnabled) {
-      const vaultData = loadSessionVault(sessionId)
-      if (vaultData) {
-        mappingTable = MappingTable.fromJSON(vaultData)
-      }
+    if (this.config.vaultEnabled) {
+      // Legacy vaults have no provider identity, so they are not imported here.
+      const vaultData = loadSessionVault(sessionId, provider)
+      if (vaultData) mappingTable = MappingTable.fromJSON(vaultData)
     }
-
-    const created = {
-      filter: new PIIFilter(this.config, mappingTable),
+    const created: SessionEntry = {
+      provider,
+      sessionId,
+      filter: new PIIFilter(this.effectiveConfig(provider), mappingTable),
       expiresAt: Date.now() + DEFAULT_SESSION_TTL_MS,
     }
-    this.explicitSessions.set(sessionId, created)
-    return created.filter
-  }
-
-  private registerVaultSaveOnClose(socket: Socket, sessionId: string, filter: PIIFilter): void {
-    let sessions = this.registeredSaveListeners.get(socket)
-    if (!sessions) {
-      sessions = new Set()
-      this.registeredSaveListeners.set(socket, sessions)
-    }
-    if (sessions.has(sessionId)) return
-    sessions.add(sessionId)
-    socket.once('close', () => {
-      saveSessionVault(sessionId, filter.getMappingTable().toJSON())
-    })
-  }
-
-  private acquireSocketSession(socket: Socket): PIIFilter {
-    const existing = this.socketSessions.get(socket)
-    if (existing) return existing
-
-    // When the caller does not provide an explicit session ID, fall back to
-    // the keep-alive connection so multi-turn restores still work safely.
-    const created = new PIIFilter(this.config)
-    this.socketSessions.set(socket, created)
-    this.socketFilters.add(created)
-    socket.once('close', () => {
-      this.socketSessions.delete(socket)
-      this.socketFilters.delete(created)
-    })
+    this.explicitSessions.set(key, created)
     return created
+  }
+
+  private registerVaultSaveOnClose(socket: Socket, key: string, entry: SessionEntry): void {
+    let registrations = this.vaultRegistrations.get(socket)
+    if (!registrations) {
+      registrations = new Map()
+      this.vaultRegistrations.set(socket, registrations)
+      const captured = registrations
+      socket.once('close', () => {
+        for (const [sessionKey, current] of captured) {
+          // Reset/expiry/clear may have replaced this entry while the socket lived.
+          if (this.config.vaultEnabled && this.explicitSessions.get(sessionKey) === current) {
+            saveSessionVault(current.sessionId, current.filter.getMappingTable().toJSON(), current.provider)
+          }
+        }
+        this.vaultRegistrations.delete(socket)
+      })
+    }
+    // One close listener per socket; same-socket reset updates its saved generation.
+    registrations.set(key, entry)
+  }
+
+  private acquireSocketSession(socket: Socket, provider: ProviderKind): PIIFilter {
+    let entries = this.socketSessions.get(socket)
+    if (!entries) {
+      entries = new Map()
+      this.socketSessions.set(socket, entries)
+      const captured = entries
+      socket.once('close', () => {
+        if (this.socketSessions.get(socket) === captured) this.socketSessions.delete(socket)
+        for (const entry of captured.values()) this.socketFilters.delete(entry)
+      })
+    }
+    const existing = entries.get(provider)
+    if (existing) return existing.filter
+
+    const created: FilterEntry = {
+      provider,
+      filter: new PIIFilter(this.effectiveConfig(provider)),
+    }
+    entries.set(provider, created)
+    this.socketFilters.add(created)
+    return created.filter
   }
 
   activeSessionCount(): number {
@@ -137,16 +157,15 @@ export class SessionFilterStore {
 
   private pruneExpiredSessions(): void {
     const now = Date.now()
-    if (this.config?.vaultEnabled) {
-      const ttlMs = (this.config.vaultTtlMinutes ?? 30) * 60 * 1000
-      cleanExpiredVaults(ttlMs)
+    if (this.config.vaultEnabled) {
+      cleanExpiredVaults((this.config.vaultTtlMinutes ?? 30) * 60 * 1000)
     }
-    for (const [sessionId, entry] of this.explicitSessions.entries()) {
+    for (const [key, entry] of this.explicitSessions) {
       if (entry.expiresAt <= now) {
-        if (this.config?.vaultEnabled) {
-          saveSessionVault(sessionId, entry.filter.getMappingTable().toJSON())
+        if (this.config.vaultEnabled) {
+          saveSessionVault(entry.sessionId, entry.filter.getMappingTable().toJSON(), entry.provider)
         }
-        this.explicitSessions.delete(sessionId)
+        this.explicitSessions.delete(key)
       }
     }
   }

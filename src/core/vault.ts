@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
 import {
   existsSync,
   mkdirSync,
@@ -18,14 +18,26 @@ export { loadOrCreateKey } from './keys.js'
 
 const VAULT_DIR = join(homedir(), '.claude', 'cloakroom-vault')
 
-function ensureVaultDir(): void {
-  if (!existsSync(VAULT_DIR)) {
-    mkdirSync(VAULT_DIR, { recursive: true, mode: 0o700 })
+type VaultProvider = 'anthropic' | 'openai'
+
+function vaultDir(provider?: VaultProvider): string {
+  return provider ? join(VAULT_DIR, provider) : VAULT_DIR
+}
+
+function ensureVaultDir(provider?: VaultProvider): void {
+  const directory = vaultDir(provider)
+  if (!existsSync(directory)) {
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
   }
 }
 
 // Sanitize session ID to prevent path traversal
-function vaultFilePath(sessionId: string): string {
+function vaultFilePath(sessionId: string, provider?: VaultProvider): string {
+  if (provider) {
+    // Separate directories never fall back to ambiguous legacy shared vaults.
+    const id = createHash('sha256').update(sessionId, 'utf8').digest('hex')
+    return join(vaultDir(provider), `${id}.vault`)
+  }
   const safe = sessionId.replace(/[^a-zA-Z0-9_-]/g, '_')
   return join(VAULT_DIR, `${safe}.vault`)
 }
@@ -54,16 +66,16 @@ function vaultKey(): Buffer {
   return deriveKey(loadOrCreateKey(), 'cloakroom-vault-v1')
 }
 
-export function saveSessionVault(sessionId: string, data: VaultData): void {
-  ensureVaultDir()
+export function saveSessionVault(sessionId: string, data: VaultData, provider?: VaultProvider): void {
+  ensureVaultDir(provider)
   const key = vaultKey()
   const json = JSON.stringify(data)
   const encrypted = encryptData(json, key)
-  writeFileSync(vaultFilePath(sessionId), encrypted, { mode: 0o600 })
+  writeFileSync(vaultFilePath(sessionId, provider), encrypted, { mode: 0o600 })
 }
 
-export function loadSessionVault(sessionId: string): VaultData | null {
-  const filePath = vaultFilePath(sessionId)
+export function loadSessionVault(sessionId: string, provider?: VaultProvider): VaultData | null {
+  const filePath = vaultFilePath(sessionId, provider)
   if (!existsSync(filePath)) return null
   try {
     const key = vaultKey()
@@ -76,8 +88,8 @@ export function loadSessionVault(sessionId: string): VaultData | null {
   }
 }
 
-export function deleteSessionVault(sessionId: string): void {
-  const filePath = vaultFilePath(sessionId)
+export function deleteSessionVault(sessionId: string, provider?: VaultProvider): void {
+  const filePath = vaultFilePath(sessionId, provider)
   if (existsSync(filePath)) {
     unlinkSync(filePath)
   }
@@ -85,18 +97,18 @@ export function deleteSessionVault(sessionId: string): void {
 
 // Remove vault files whose mtime is older than ttlMs milliseconds.
 export function cleanExpiredVaults(ttlMs: number): void {
-  if (!existsSync(VAULT_DIR)) return
   const now = Date.now()
-  for (const file of readdirSync(VAULT_DIR)) {
-    if (!file.endsWith('.vault')) continue
-    const filePath = join(VAULT_DIR, file)
-    try {
-      const stat = statSync(filePath)
-      if (now - stat.mtimeMs > ttlMs) {
-        unlinkSync(filePath)
+  for (const directory of [vaultDir(), vaultDir('anthropic'), vaultDir('openai')]) {
+    if (!existsSync(directory)) continue
+    for (const file of readdirSync(directory)) {
+      if (!file.endsWith('.vault')) continue
+      const filePath = join(directory, file)
+      try {
+        const stat = statSync(filePath)
+        if (now - stat.mtimeMs > ttlMs) unlinkSync(filePath)
+      } catch {
+        // Skip files we can't stat
       }
-    } catch {
-      // Skip files we can't stat
     }
   }
 }

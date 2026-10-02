@@ -140,10 +140,11 @@ export class PIIFilter {
     readonly mappingTable: MappingTable
     readonly restoreEncodedText?: (text: string) => string
   } {
-    const fpeEnabled = this.config.fpe?.enabled
+    const enabled = this.isEnabled()
+    const fpeEnabled = enabled && this.config.fpe?.enabled
     const fpeKey = this.fpeKey
     return {
-      mappingTable: this.mappingTable,
+      mappingTable: enabled ? this.mappingTable : new MappingTable(),
       restoreEncodedText: fpeEnabled ? (text) => scanAndRestoreFpe(text, fpeKey) : undefined,
     }
   }
